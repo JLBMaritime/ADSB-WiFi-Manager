@@ -92,7 +92,7 @@ sudo apt-get install git
    ```bash
    cd /home/JLBMaritime
    git clone https://github.com/JLBMaritime/ADSB-WiFi-Manager.git
-   cd adsb-wifi-manager
+   cd ADSB-WiFi-Manager
    ```
 
 2. **Make installation script executable**:
@@ -516,4 +516,5 @@ This project is developed for JLBMaritime. All rights reserved.
 **Version**: 1.0.0  
 **Last Updated**: December 2025  
 **Author**: JLBMaritime Development Team
+
 
