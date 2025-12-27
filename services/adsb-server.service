@@ -1,0 +1,22 @@
+[Unit]
+Description=ADS-B Server - Data Receiver and Forwarder
+After=network.target dump1090-fa.service
+Wants=dump1090-fa.service
+
+[Service]
+Type=simple
+User=JLBMaritime
+Group=JLBMaritime
+WorkingDirectory=/home/JLBMaritime/adsb-wifi-manager
+ExecStart=/usr/bin/python3 /home/JLBMaritime/adsb-wifi-manager/adsb_server/adsb_server.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
