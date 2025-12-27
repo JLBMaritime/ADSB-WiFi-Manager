@@ -89,6 +89,9 @@ chown -R $ACTUAL_USER:$ACTUAL_USER "$INSTALL_DIR/logs"
 # Configure Wi-Fi Hotspot on wlan1
 echo "[6/10] Configuring Wi-Fi hotspot on wlan1..."
 
+# Ensure network interfaces directory exists
+mkdir -p /etc/network/interfaces.d/
+
 # Configure hostapd
 cat > /etc/hostapd/hostapd.conf << EOF
 # JLBMaritime ADS-B Hotspot Configuration

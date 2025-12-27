@@ -83,16 +83,11 @@ This system provides a complete ADS-B (Automatic Dependent Surveillance-Broadcas
 
 ### Quick Install
 
-Note: If you need to install git use this:
-```bash
-sudo apt-get install git
-```
-
 1. **Download the repository** to your Raspberry Pi:
    ```bash
    cd /home/JLBMaritime
-   git clone https://github.com/JLBMaritime/ADSB-WiFi-Manager.git
-   cd ADSB-WiFi-Manager
+   git clone <repository-url> adsb-wifi-manager
+   cd adsb-wifi-manager
    ```
 
 2. **Make installation script executable**:
@@ -137,7 +132,7 @@ Approximately **15-30 minutes** depending on internet speed.
 - **Password**: `Admin123`
 
 **Web Interface**:
-- **URL**: `http://ADS-B.local` or `http://192.168.4.1`
+- **URL**: `http://ADS-B.local:5000` or `http://192.168.4.1:5000`
 - **Username**: `JLBMaritime`
 - **Password**: `Admin`
 
@@ -357,6 +352,37 @@ sudo truncate -s 0 /home/JLBMaritime/adsb-wifi-manager/logs/adsb_server.log
 sudo systemctl restart adsb-server web-manager
 ```
 
+### Port 80 Conflict (Lighttpd)
+
+**Problem**: Web interface shows "Port 80 is in use" or 403 Forbidden
+
+**Cause**: dump1090-fa installs lighttpd which uses ports 80 and 8080
+
+**Solution**: The web interface runs on port 5000 by default to avoid this conflict.
+- Access at: `http://192.168.4.1:5000`
+- dump1090 SkyAware available at: `http://192.168.4.1:8080`
+
+### wlan1 Keeps Connecting as Client
+
+**Problem**: Hotspot not visible, wlan1 connects to saved WiFi network
+
+**Cause**: wpa_supplicant auto-connects wlan1 to saved networks
+
+**Solution**:
+```bash
+# Disconnect wlan1 from client networks
+sudo wpa_cli -i wlan1 disconnect
+sudo ip addr flush dev wlan1
+
+# Configure wlan1 as hotspot
+sudo ip link set wlan1 down
+sudo ip link set wlan1 up
+sudo ip addr add 192.168.4.1/24 dev wlan1
+
+# Restart hostapd
+sudo systemctl restart hostapd
+```
+
 ---
 
 ## 🏗️ Architecture
@@ -516,5 +542,3 @@ This project is developed for JLBMaritime. All rights reserved.
 **Version**: 1.0.0  
 **Last Updated**: December 2025  
 **Author**: JLBMaritime Development Team
-
-
