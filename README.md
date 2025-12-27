@@ -83,10 +83,15 @@ This system provides a complete ADS-B (Automatic Dependent Surveillance-Broadcas
 
 ### Quick Install
 
+Note: If you need to install git use this:
+```bash
+sudo apt-get install git
+```
+
 1. **Download the repository** to your Raspberry Pi:
    ```bash
    cd /home/JLBMaritime
-   git clone <repository-url> adsb-wifi-manager
+   git clone https://github.com/JLBMaritime/ADSB-WiFi-Manager.git
    cd adsb-wifi-manager
    ```
 
@@ -511,3 +516,4 @@ This project is developed for JLBMaritime. All rights reserved.
 **Version**: 1.0.0  
 **Last Updated**: December 2025  
 **Author**: JLBMaritime Development Team
+
