@@ -355,6 +355,11 @@ async function loadADSBConfig() {
             }
             currentICAOList = data.icao_list;
             
+            // Set altitude filter
+            document.getElementById('altitude-filter-enabled').checked = data.altitude_filter_enabled || false;
+            document.getElementById('max-altitude').value = data.max_altitude || 10000;
+            toggleAltitudeFilter();
+            
             // Set endpoints
             currentEndpoints = data.endpoints;
             displayEndpoints();
@@ -368,6 +373,12 @@ function toggleFilterMode() {
     const mode = document.querySelector('input[name="filter-mode"]:checked').value;
     const icaoSection = document.getElementById('icao-filter-section');
     icaoSection.style.display = mode === 'specific' ? 'block' : 'none';
+}
+
+function toggleAltitudeFilter() {
+    const enabled = document.getElementById('altitude-filter-enabled').checked;
+    const altitudeSection = document.getElementById('altitude-filter-section');
+    altitudeSection.style.display = enabled ? 'block' : 'none';
 }
 
 function displayEndpoints() {
@@ -440,6 +451,10 @@ async function saveADSBConfig() {
         icaoList = input.split(',').map(s => s.trim().toUpperCase()).filter(s => s);
     }
     
+    // Get altitude filter settings
+    const altitudeFilterEnabled = document.getElementById('altitude-filter-enabled').checked;
+    const maxAltitude = parseInt(document.getElementById('max-altitude').value) || 10000;
+    
     try {
         const response = await fetch('/api/adsb/config', {
             method: 'POST',
@@ -447,6 +462,8 @@ async function saveADSBConfig() {
             body: JSON.stringify({
                 filter_mode: filterMode,
                 icao_list: icaoList,
+                altitude_filter_enabled: altitudeFilterEnabled,
+                max_altitude: maxAltitude,
                 endpoints: currentEndpoints
             })
         });

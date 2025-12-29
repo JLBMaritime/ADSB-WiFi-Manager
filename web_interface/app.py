@@ -221,6 +221,10 @@ def get_adsb_config():
         icao_list = config.get('Filter', 'icao_list', fallback='').split(',')
         icao_list = [icao.strip() for icao in icao_list if icao.strip()]
         
+        # Get altitude filter settings
+        altitude_filter_enabled = config.getboolean('Filter', 'altitude_filter_enabled', fallback=False)
+        max_altitude = config.getint('Filter', 'max_altitude', fallback=10000)
+        
         endpoints = []
         endpoint_count = config.getint('Endpoints', 'count', fallback=0)
         for i in range(endpoint_count):
@@ -233,6 +237,8 @@ def get_adsb_config():
             'success': True,
             'filter_mode': filter_mode,
             'icao_list': icao_list,
+            'altitude_filter_enabled': altitude_filter_enabled,
+            'max_altitude': max_altitude,
             'endpoints': endpoints
         })
     except Exception as e:
@@ -255,6 +261,13 @@ def update_adsb_config():
         if 'icao_list' in data:
             icao_string = ','.join(data['icao_list'])
             config.set('Filter', 'icao_list', icao_string)
+        
+        # Update altitude filter
+        if 'altitude_filter_enabled' in data:
+            config.set('Filter', 'altitude_filter_enabled', str(data['altitude_filter_enabled']).lower())
+            
+        if 'max_altitude' in data:
+            config.set('Filter', 'max_altitude', str(data['max_altitude']))
             
         # Update endpoints
         if 'endpoints' in data:

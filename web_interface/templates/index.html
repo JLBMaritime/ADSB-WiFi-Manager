@@ -143,6 +143,23 @@
             </div>
 
             <div class="card">
+                <h3>Altitude Filter</h3>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="altitude-filter-enabled" onchange="toggleAltitudeFilter()"> Enable Altitude Filter
+                    </label>
+                </div>
+                
+                <div id="altitude-filter-section" style="display:none;">
+                    <div class="form-group">
+                        <label for="max-altitude">Maximum Altitude (feet):</label>
+                        <input type="number" id="max-altitude" placeholder="10000" min="0" max="50000" step="100">
+                        <small>Only forward aircraft from ground level up to this altitude</small>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
                 <h3>TCP Endpoints</h3>
                 <div id="endpoints-list"></div>
                 

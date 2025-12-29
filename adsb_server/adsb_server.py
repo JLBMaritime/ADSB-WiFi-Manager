@@ -22,6 +22,8 @@ class ADSBServer:
         self.endpoint_sockets = []
         self.filter_icao_list = []
         self.filter_all = True
+        self.altitude_filter_enabled = False
+        self.max_altitude = 10000
         self.endpoints = []
         
         # Setup logging
@@ -78,6 +80,10 @@ class ADSBServer:
             if not self.filter_all:
                 icao_string = self.config.get('Filter', 'icao_list', fallback='')
                 self.filter_icao_list = [icao.strip().upper() for icao in icao_string.split(',') if icao.strip()]
+            
+            # Load altitude filter settings
+            self.altitude_filter_enabled = self.config.getboolean('Filter', 'altitude_filter_enabled', fallback=False)
+            self.max_altitude = self.config.getint('Filter', 'max_altitude', fallback=10000)
                 
             # Load endpoints
             self.endpoints = []
@@ -101,7 +107,9 @@ class ADSBServer:
         }
         self.config['Filter'] = {
             'mode': 'specific',
-            'icao_list': 'A92F2D,A932E4,A9369B,A93A52'
+            'icao_list': 'A92F2D,A932E4,A9369B,A93A52',
+            'altitude_filter_enabled': 'false',
+            'max_altitude': '10000'
         }
         self.config['Endpoints'] = {
             'count': '0'
@@ -161,15 +169,31 @@ class ADSBServer:
             
     def filter_message(self, message):
         """Check if message should be forwarded based on filter"""
-        if self.filter_all:
-            return True
-            
-        # SBS1 format: MSG,3,1,1,ICAO,1,2023/01/01,12:00:00.000,2023/01/01,12:00:00.000,...
+        # SBS1 format: MSG,3,1,1,ICAO,1,DATE,TIME,DATE,TIME,CALLSIGN,ALTITUDE,SPEED,TRACK,LAT,LON...
+        #              0   1 2 3  4    5  6    7    8    9     10      11       12     13    14  15
         try:
             parts = message.split(',')
+            
+            # Check altitude filter first (applies to all modes)
+            if self.altitude_filter_enabled and len(parts) > 11:
+                altitude_str = parts[11].strip()
+                if altitude_str:  # Altitude field not empty
+                    try:
+                        altitude = int(altitude_str)
+                        if altitude > self.max_altitude:
+                            return False  # Reject aircraft above max altitude
+                    except ValueError:
+                        pass  # Invalid altitude, continue with other filters
+            
+            # If filter_all mode, accept everything (that passed altitude filter)
+            if self.filter_all:
+                return True
+            
+            # Check ICAO filter for specific mode
             if len(parts) > 4:
                 icao = parts[4].strip().upper()
                 return icao in self.filter_icao_list
+                
         except:
             pass
             
