@@ -111,22 +111,37 @@ async function scanNetworks() {
     container.innerHTML = '<p>Scanning for networks...</p>';
     
     try {
-        const response = await fetch('/api/wifi/scan');
-        const data = await response.json();
+        // Get current network and saved networks info
+        const [scanResponse, currentResponse, savedResponse] = await Promise.all([
+            fetch('/api/wifi/scan'),
+            fetch('/api/wifi/current'),
+            fetch('/api/wifi/saved')
+        ]);
         
-        if (data.success && data.networks.length > 0) {
+        const scanData = await scanResponse.json();
+        const currentData = await currentResponse.json();
+        const savedData = await savedResponse.json();
+        
+        const currentSSID = currentData.success && currentData.network ? currentData.network.ssid : null;
+        const savedSSIDs = savedData.success ? savedData.networks.map(n => n.ssid) : [];
+        
+        if (scanData.success && scanData.networks.length > 0) {
             container.innerHTML = '';
-            data.networks.forEach(network => {
+            scanData.networks.forEach(network => {
+                const isCurrentNetwork = network.ssid === currentSSID;
+                const isSavedNetwork = savedSSIDs.includes(network.ssid);
+                const isCurrentAndSaved = isCurrentNetwork && isSavedNetwork;
+                
                 const networkDiv = document.createElement('div');
-                networkDiv.className = 'network-item';
+                networkDiv.className = isCurrentAndSaved ? 'network-item current' : 'network-item';
                 networkDiv.innerHTML = `
                     <div class="network-info">
-                        <div class="network-name">${network.ssid}</div>
+                        <div class="network-name">${network.ssid}${isCurrentAndSaved ? ' (Connected)' : ''}</div>
                         <div class="network-details">
                             Signal: ${network.signal}% ${network.encrypted ? '🔒' : ''}
                         </div>
                     </div>
-                    <button class="btn btn-primary" onclick="showConnectModal('${network.ssid}', ${network.encrypted})">Connect</button>
+                    ${!isCurrentAndSaved ? `<button class="btn btn-primary" onclick="showConnectModal('${network.ssid}', ${network.encrypted})">Connect</button>` : ''}
                 `;
                 container.appendChild(networkDiv);
             });

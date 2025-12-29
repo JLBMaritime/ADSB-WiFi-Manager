@@ -58,17 +58,22 @@ class WiFiController:
             if current_network:
                 networks.append(current_network)
                 
-            # Remove duplicates and empty SSIDs
+            # Remove duplicates and invalid SSIDs
             seen = set()
             unique_networks = []
             for net in networks:
-                if 'ssid' in net and net['ssid'] and net['ssid'] not in seen:
-                    seen.add(net['ssid'])
-                    if 'signal' not in net:
-                        net['signal'] = 0
-                    if 'encrypted' not in net:
-                        net['encrypted'] = True
-                    unique_networks.append(net)
+                # Validate SSID - reject null bytes, non-printable chars, or empty
+                if 'ssid' in net and net['ssid']:
+                    ssid = net['ssid']
+                    # Check for valid printable characters only
+                    if ssid.strip() and all(c.isprintable() or c.isspace() for c in ssid):
+                        if ssid not in seen:
+                            seen.add(ssid)
+                            if 'signal' not in net:
+                                net['signal'] = 0
+                            if 'encrypted' not in net:
+                                net['encrypted'] = True
+                            unique_networks.append(net)
                     
             return sorted(unique_networks, key=lambda x: x['signal'], reverse=True)
             
