@@ -304,40 +304,6 @@ async function runPing() {
     }
 }
 
-async function runDiagnostics() {
-    const output = document.getElementById('diagnostics-output');
-    output.innerHTML = '<p>Running diagnostics...</p>';
-    
-    try {
-        const response = await fetch('/api/wifi/diagnostics');
-        const data = await response.json();
-        
-        if (data.success) {
-            const diag = data.diagnostics;
-            output.innerHTML = `
-                <div class="status-grid">
-                    <div class="status-item">
-                        <span class="label">Interface Up:</span>
-                        <span>${diag.interface_up ? 'Yes' : 'No'}</span>
-                    </div>
-                    <div class="status-item">
-                        <span class="label">Gateway:</span>
-                        <span>${diag.gateway}</span>
-                    </div>
-                    <div class="status-item">
-                        <span class="label">DNS Servers:</span>
-                        <span>${diag.dns ? diag.dns.join(', ') : 'None'}</span>
-                    </div>
-                </div>
-                <pre>${diag.ip_config}</pre>
-            `;
-        }
-    } catch (error) {
-        console.error('Error running diagnostics:', error);
-        output.innerHTML = '<p>Error running diagnostics</p>';
-    }
-}
-
 // ADS-B Configuration Functions
 async function loadADSBConfig() {
     try {
