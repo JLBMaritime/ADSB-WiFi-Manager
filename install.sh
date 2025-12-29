@@ -159,8 +159,22 @@ EOF
 # Stop wpa_supplicant from auto-starting for wlan1
 systemctl disable wpa_supplicant@wlan1 2>/dev/null || true
 
+# Prevent NetworkManager from managing wlan1
+echo "[7/10] Configuring NetworkManager to ignore wlan1..."
+mkdir -p /etc/NetworkManager/conf.d
+cat > /etc/NetworkManager/conf.d/unmanage-wlan1.conf << EOF
+[keyfile]
+unmanaged-devices=interface-name:wlan1
+EOF
+
+# Restart NetworkManager if it's running
+if systemctl is-active NetworkManager &>/dev/null; then
+    echo "Restarting NetworkManager..."
+    systemctl restart NetworkManager
+fi
+
 # Configure mDNS (Avahi)
-echo "[7/10] Configuring mDNS for ADS-B.local resolution..."
+echo "[8/10] Configuring mDNS for ADS-B.local resolution..."
 systemctl enable avahi-daemon
 systemctl start avahi-daemon
 
@@ -183,7 +197,7 @@ echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 sysctl -p
 
 # Install systemd services
-echo "[8/10] Installing systemd services..."
+echo "[9/10] Installing systemd services..."
 
 # Install ADS-B Server service
 cp "$INSTALL_DIR/services/adsb-server.service" /etc/systemd/system/
@@ -196,7 +210,7 @@ systemctl daemon-reload
 systemctl enable web-manager.service
 
 # Configure sudo permissions for web interface
-echo "[9/10] Configuring sudo permissions..."
+echo "[10/10] Configuring sudo permissions..."
 cat > /etc/sudoers.d/adsb-wifi-manager << EOF
 # Allow web interface to control services and Wi-Fi
 www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl start adsb-server
@@ -218,7 +232,7 @@ EOF
 chmod 0440 /etc/sudoers.d/adsb-wifi-manager
 
 # Start services
-echo "[10/10] Starting services..."
+echo "[11/11] Starting services..."
 
 # Enable and start hotspot
 systemctl unmask hostapd

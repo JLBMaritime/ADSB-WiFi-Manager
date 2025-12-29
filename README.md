@@ -362,6 +362,36 @@ sudo systemctl restart adsb-server web-manager
 - Access at: `http://192.168.4.1:5000`
 - dump1090 SkyAware available at: `http://192.168.4.1:8080`
 
+### NetworkManager Managing wlan1 (MOST COMMON ISSUE)
+
+**Problem**: Hotspot appears briefly then disappears, or wlan1 shows as "disconnected" in NetworkManager
+
+**Cause**: NetworkManager is managing wlan1 and preventing hostapd from using it as an access point
+
+**Solution**:
+```bash
+# Create NetworkManager unmanage rule
+sudo mkdir -p /etc/NetworkManager/conf.d
+sudo tee /etc/NetworkManager/conf.d/unmanage-wlan1.conf > /dev/null <<EOF
+[keyfile]
+unmanaged-devices=interface-name:wlan1
+EOF
+
+# Restart NetworkManager
+sudo systemctl restart NetworkManager
+
+# Reconfigure wlan1
+sudo ip link set wlan1 down
+sudo ip link set wlan1 up
+sudo ip addr add 192.168.4.1/24 dev wlan1
+
+# Restart hostapd
+sudo systemctl restart hostapd
+
+# Verify wlan1 is in AP mode
+iw dev wlan1 info  # Should show "type AP"
+```
+
 ### wlan1 Keeps Connecting as Client
 
 **Problem**: Hotspot not visible, wlan1 connects to saved WiFi network
