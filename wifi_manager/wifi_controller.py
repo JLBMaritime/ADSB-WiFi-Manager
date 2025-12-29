@@ -62,18 +62,28 @@ class WiFiController:
             seen = set()
             unique_networks = []
             for net in networks:
-                # Validate SSID - reject null bytes, non-printable chars, or empty
+                # Validate SSID - reject null bytes, control chars, or empty
                 if 'ssid' in net and net['ssid']:
                     ssid = net['ssid']
-                    # Check for valid printable characters only
-                    if ssid.strip() and all(c.isprintable() or c.isspace() for c in ssid):
-                        if ssid not in seen:
-                            seen.add(ssid)
-                            if 'signal' not in net:
-                                net['signal'] = 0
-                            if 'encrypted' not in net:
-                                net['encrypted'] = True
-                            unique_networks.append(net)
+                    # Explicitly reject invalid SSIDs
+                    # 1. Reject if contains null bytes
+                    # 2. Reject if empty after stripping whitespace
+                    # 3. Reject if contains control characters (ASCII 0-31 except tab/newline/return)
+                    if '\x00' in ssid:
+                        continue  # Skip networks with null bytes
+                    if not ssid.strip():
+                        continue  # Skip empty/whitespace-only SSIDs
+                    if any(ord(c) < 32 and c not in '\t\n\r' for c in ssid):
+                        continue  # Skip SSIDs with control characters
+                    
+                    # Add valid network if not already seen
+                    if ssid not in seen:
+                        seen.add(ssid)
+                        if 'signal' not in net:
+                            net['signal'] = 0
+                        if 'encrypted' not in net:
+                            net['encrypted'] = True
+                        unique_networks.append(net)
                     
             return sorted(unique_networks, key=lambda x: x['signal'], reverse=True)
             
