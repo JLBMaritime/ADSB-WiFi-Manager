@@ -224,6 +224,7 @@ async function connectToNetwork() {
             setTimeout(() => {
                 loadCurrentNetwork();
                 loadSavedNetworks();
+                scanNetworks();
             }, 5000);
         } else {
             alert('Failed to connect to network');
@@ -248,6 +249,7 @@ async function connectToSaved(ssid) {
             setTimeout(() => {
                 loadCurrentNetwork();
                 loadSavedNetworks();
+                scanNetworks();
             }, 3000);
         } else {
             alert('Failed to connect to network');
