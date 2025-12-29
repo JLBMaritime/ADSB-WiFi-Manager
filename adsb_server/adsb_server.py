@@ -104,7 +104,7 @@ class ADSBServer:
         """Create default configuration file"""
         self.config['Dump1090'] = {
             'host': '127.0.0.1',
-            'port': '30005'
+            'port': '30003'
         }
         self.config['Filter'] = {
             'mode': 'specific',

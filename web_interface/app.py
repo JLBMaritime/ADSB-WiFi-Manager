@@ -443,7 +443,7 @@ if __name__ == '__main__':
     # Create default config if it doesn't exist
     if not os.path.exists(ADSB_CONFIG_PATH):
         config = configparser.ConfigParser()
-        config['Dump1090'] = {'host': '127.0.0.1', 'port': '30005'}
+        config['Dump1090'] = {'host': '127.0.0.1', 'port': '30003'}
         config['Filter'] = {'mode': 'specific', 'icao_list': 'A92F2D,A932E4,A9369B,A93A52'}
         config['Endpoints'] = {'count': '0'}
         with open(ADSB_CONFIG_PATH, 'w') as f:
