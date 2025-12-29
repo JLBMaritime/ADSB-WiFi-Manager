@@ -66,11 +66,11 @@ class WiFiController:
                 if 'ssid' in net and net['ssid']:
                     ssid = net['ssid']
                     # Explicitly reject invalid SSIDs
-                    # 1. Reject if contains null bytes
+                    # 1. Reject if contains actual null bytes OR escaped null byte strings
                     # 2. Reject if empty after stripping whitespace
                     # 3. Reject if contains control characters (ASCII 0-31 except tab/newline/return)
-                    if '\x00' in ssid:
-                        continue  # Skip networks with null bytes
+                    if '\x00' in ssid or '\\x00' in ssid or ssid.startswith('\\x'):
+                        continue  # Skip networks with null bytes (real or escaped)
                     if not ssid.strip():
                         continue  # Skip empty/whitespace-only SSIDs
                     if any(ord(c) < 32 and c not in '\t\n\r' for c in ssid):
