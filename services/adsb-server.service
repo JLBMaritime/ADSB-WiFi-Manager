@@ -1,16 +1,18 @@
 [Unit]
 Description=ADS-B Server - Data Receiver and Forwarder
-After=network.target dump1090-fa.service
-Wants=dump1090-fa.service
+After=network-online.target dump1090-fa.service
+Wants=network-online.target dump1090-fa.service
+Requires=network-online.target
 
 [Service]
 Type=simple
 User=jlbmaritime
 Group=jlbmaritime
 WorkingDirectory=/home/jlbmaritime/adsb-wifi-manager
+ExecStartPre=/bin/sleep 10
 ExecStart=/usr/bin/python3 /home/jlbmaritime/adsb-wifi-manager/adsb_server/adsb_server.py
 Restart=always
-RestartSec=10
+RestartSec=15
 StandardOutput=journal
 StandardError=journal
 

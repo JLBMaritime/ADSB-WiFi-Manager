@@ -104,10 +104,10 @@ wmm_enabled=0
 macaddr_acl=0
 auth_algs=1
 ignore_broadcast_ssid=0
-wpa=2
+wpa=3
 wpa_passphrase=Admin123
 wpa_key_mgmt=WPA-PSK
-wpa_pairwise=TKIP
+wpa_pairwise=CCMP TKIP
 rsn_pairwise=CCMP
 EOF
 
@@ -225,15 +225,36 @@ systemctl unmask hostapd
 systemctl enable hostapd
 systemctl enable dnsmasq
 
-# Bring up wlan1 interface
-ifconfig wlan1 192.168.4.1 netmask 255.255.255.0 up || ip addr add 192.168.4.1/24 dev wlan1 || true
+# Bring up wlan1 interface and disable power management
+echo "Configuring wlan1 interface..."
+ip link set wlan1 down || true
+sleep 2
 ip link set wlan1 up || true
+sleep 1
+ip addr add 192.168.4.1/24 dev wlan1 2>/dev/null || true
 
+# Disable power management on wlan1 for stability
+iw dev wlan1 set power_save off 2>/dev/null || true
+iwconfig wlan1 power off 2>/dev/null || true
+
+# Give wlan1 time to stabilize before starting hostapd
+echo "Waiting for wlan1 to stabilize..."
+sleep 3
+
+# Start hostapd and dnsmasq with delay
 systemctl start hostapd
+sleep 2
 systemctl start dnsmasq
 
-# Start application services
+# Wait for dump1090-fa to be ready (if installed)
+if systemctl is-enabled dump1090-fa &>/dev/null; then
+    echo "Waiting for dump1090-fa to start..."
+    sleep 5
+fi
+
+# Start application services with delays
 systemctl start adsb-server.service
+sleep 2
 systemctl start web-manager.service
 
 echo ""
