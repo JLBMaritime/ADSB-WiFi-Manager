@@ -35,9 +35,6 @@ function openTab(tabName) {
         case 'adsb':
             loadADSBConfig();
             break;
-        case 'settings':
-            loadSystemInfo();
-            break;
     }
 }
 
@@ -71,6 +68,28 @@ async function refreshDashboard() {
         }
     } catch (error) {
         console.error('Error refreshing dashboard:', error);
+    }
+    
+    // Load TCP Endpoints summary
+    try {
+        const response = await fetch('/api/adsb/config');
+        const data = await response.json();
+        
+        const container = document.getElementById('endpoints-summary');
+        if (data.success && data.endpoints && data.endpoints.length > 0) {
+            let html = `<p><strong>${data.endpoints.length} endpoint${data.endpoints.length !== 1 ? 's' : ''} configured</strong></p><ul style="margin: 10px 0; padding-left: 20px;">`;
+            data.endpoints.forEach(endpoint => {
+                const displayText = endpoint.name ? `${endpoint.name} - ${endpoint.ip}:${endpoint.port}` : `${endpoint.ip}:${endpoint.port}`;
+                html += `<li>${displayText}</li>`;
+            });
+            html += '</ul>';
+            container.innerHTML = html;
+        } else {
+            container.innerHTML = '<p>No TCP endpoints configured</p>';
+        }
+    } catch (error) {
+        console.error('Error loading endpoints summary:', error);
+        document.getElementById('endpoints-summary').innerHTML = '<p>Error loading endpoints</p>';
     }
 }
 
@@ -541,31 +560,6 @@ async function changePassword() {
     } catch (error) {
         console.error('Error changing password:', error);
         alert('Error changing password');
-    }
-}
-
-async function loadSystemInfo() {
-    try {
-        const response = await fetch('/api/settings/system-info');
-        const data = await response.json();
-        
-        if (data.success) {
-            document.getElementById('system-info').innerHTML = `
-                <div class="status-grid">
-                    <div class="status-item">
-                        <span class="label">Hostname:</span>
-                        <span>${data.hostname}</span>
-                    </div>
-                    <div class="status-item">
-                        <span class="label">Uptime:</span>
-                        <span>${data.uptime}</span>
-                    </div>
-                </div>
-                <pre>${data.os_info}</pre>
-            `;
-        }
-    } catch (error) {
-        console.error('Error loading system info:', error);
     }
 }
 
