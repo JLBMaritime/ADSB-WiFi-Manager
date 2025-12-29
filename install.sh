@@ -139,6 +139,26 @@ iface wlan0 inet dhcp
     wpa-conf /etc/wpa_supplicant/wpa_supplicant.conf
 EOF
 
+# Prevent wpa_supplicant from managing wlan1 (hotspot interface)
+echo "Preventing wpa_supplicant from managing wlan1..."
+
+# Remove any saved networks for wlan1 from wpa_supplicant
+if [ -f /etc/wpa_supplicant/wpa_supplicant-wlan1.conf ]; then
+    rm -f /etc/wpa_supplicant/wpa_supplicant-wlan1.conf
+fi
+
+# Create wpa_supplicant config that excludes wlan1
+cat > /etc/wpa_supplicant/wpa_supplicant.conf << EOF
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+country=GB
+
+# Only manage wlan0, not wlan1
+EOF
+
+# Stop wpa_supplicant from auto-starting for wlan1
+systemctl disable wpa_supplicant@wlan1 2>/dev/null || true
+
 # Configure mDNS (Avahi)
 echo "[7/10] Configuring mDNS for ADS-B.local resolution..."
 systemctl enable avahi-daemon
