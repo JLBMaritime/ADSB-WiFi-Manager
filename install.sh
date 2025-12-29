@@ -25,7 +25,7 @@ if [ "$ACTUAL_USER" = "root" ]; then
     exit 1
 fi
 
-INSTALL_DIR="/home/$ACTUAL_USER/adsb-wifi-manager"
+INSTALL_DIR="/home/$ACTUAL_USER/AIS-WiFi-Manager"
 
 echo "Installing for user: $ACTUAL_USER"
 echo "Installation directory: $INSTALL_DIR"
@@ -203,6 +203,11 @@ sysctl -p
 
 # Install systemd services
 echo "[9/10] Installing systemd services..."
+
+# Install wlan1 configuration service (runs before hostapd)
+cp "$INSTALL_DIR/services/wlan1-config.service" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable wlan1-config.service
 
 # Install ADS-B Server service
 cp "$INSTALL_DIR/services/adsb-server.service" /etc/systemd/system/
