@@ -228,10 +228,11 @@ def get_adsb_config():
         endpoints = []
         endpoint_count = config.getint('Endpoints', 'count', fallback=0)
         for i in range(endpoint_count):
+            name = config.get('Endpoints', f'endpoint_{i}_name', fallback='')
             ip = config.get('Endpoints', f'endpoint_{i}_ip', fallback='')
             port = config.get('Endpoints', f'endpoint_{i}_port', fallback='')
             if ip and port:
-                endpoints.append({'ip': ip, 'port': port})
+                endpoints.append({'name': name, 'ip': ip, 'port': port})
                 
         return jsonify({
             'success': True,
@@ -273,6 +274,7 @@ def update_adsb_config():
         if 'endpoints' in data:
             config.set('Endpoints', 'count', str(len(data['endpoints'])))
             for i, endpoint in enumerate(data['endpoints']):
+                config.set('Endpoints', f'endpoint_{i}_name', endpoint.get('name', ''))
                 config.set('Endpoints', f'endpoint_{i}_ip', endpoint['ip'])
                 config.set('Endpoints', f'endpoint_{i}_port', str(endpoint['port']))
                 

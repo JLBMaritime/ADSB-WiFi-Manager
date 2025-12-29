@@ -393,9 +393,10 @@ function displayEndpoints() {
     currentEndpoints.forEach((endpoint, index) => {
         const div = document.createElement('div');
         div.className = 'endpoint-item';
+        const displayText = endpoint.name ? `${endpoint.name} - ${endpoint.ip}:${endpoint.port}` : `${endpoint.ip}:${endpoint.port}`;
         div.innerHTML = `
             <div>
-                <strong>${endpoint.ip}:${endpoint.port}</strong>
+                <strong>${displayText}</strong>
             </div>
             <div class="button-group">
                 <button class="btn btn-secondary" onclick="testEndpoint('${endpoint.ip}', ${endpoint.port})">Test</button>
@@ -407,6 +408,7 @@ function displayEndpoints() {
 }
 
 function addEndpoint() {
+    const name = document.getElementById('endpoint-name').value.trim();
     const ip = document.getElementById('endpoint-ip').value.trim();
     const port = parseInt(document.getElementById('endpoint-port').value);
     
@@ -415,9 +417,10 @@ function addEndpoint() {
         return;
     }
     
-    currentEndpoints.push({ip, port});
+    currentEndpoints.push({name, ip, port});
     displayEndpoints();
     
+    document.getElementById('endpoint-name').value = '';
     document.getElementById('endpoint-ip').value = '';
     document.getElementById('endpoint-port').value = '';
 }

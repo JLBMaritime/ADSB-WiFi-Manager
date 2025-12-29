@@ -89,10 +89,11 @@ class ADSBServer:
             self.endpoints = []
             endpoint_count = self.config.getint('Endpoints', 'count', fallback=0)
             for i in range(endpoint_count):
+                name = self.config.get('Endpoints', f'endpoint_{i}_name', fallback='')
                 ip = self.config.get('Endpoints', f'endpoint_{i}_ip', fallback=None)
                 port = self.config.getint('Endpoints', f'endpoint_{i}_port', fallback=None)
                 if ip and port:
-                    self.endpoints.append({'ip': ip, 'port': port, 'socket': None})
+                    self.endpoints.append({'name': name, 'ip': ip, 'port': port, 'socket': None})
                     
             self.logger.info(f"Configuration loaded: Filter={'ALL' if self.filter_all else self.filter_icao_list}, Endpoints={len(self.endpoints)}")
             
