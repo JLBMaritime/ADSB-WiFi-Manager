@@ -4,6 +4,7 @@
 let currentSSID = null;
 let currentEndpoints = [];
 let currentICAOList = [];
+let editingEndpointIndex = null;
 
 // Tab Navigation
 function openTab(tabName) {
@@ -378,16 +379,35 @@ function displayEndpoints() {
     currentEndpoints.forEach((endpoint, index) => {
         const div = document.createElement('div');
         div.className = 'endpoint-item';
-        const displayText = endpoint.name ? `${endpoint.name} - ${endpoint.ip}:${endpoint.port}` : `${endpoint.ip}:${endpoint.port}`;
-        div.innerHTML = `
-            <div>
-                <strong>${displayText}</strong>
-            </div>
-            <div class="button-group">
-                <button class="btn btn-secondary" onclick="testEndpoint('${endpoint.ip}', ${endpoint.port})">Test</button>
-                <button class="btn btn-danger" onclick="removeEndpoint(${index})">Remove</button>
-            </div>
-        `;
+        div.id = `endpoint-${index}`;
+        
+        if (editingEndpointIndex === index) {
+            // Show editable form
+            div.innerHTML = `
+                <div style="flex-grow: 1;">
+                    <input type="text" id="edit-name-${index}" value="${endpoint.name || ''}" placeholder="Name (optional)" style="width: 100%; margin-bottom: 5px;">
+                    <input type="text" id="edit-ip-${index}" value="${endpoint.ip}" placeholder="IP Address" style="width: 48%; margin-right: 2%;">
+                    <input type="number" id="edit-port-${index}" value="${endpoint.port}" placeholder="Port" style="width: 48%;">
+                </div>
+                <div class="button-group">
+                    <button class="btn btn-success" onclick="saveEditedEndpoint(${index})">Save</button>
+                    <button class="btn btn-secondary" onclick="cancelEdit()">Cancel</button>
+                </div>
+            `;
+        } else {
+            // Show normal view
+            const displayText = endpoint.name ? `${endpoint.name} - ${endpoint.ip}:${endpoint.port}` : `${endpoint.ip}:${endpoint.port}`;
+            div.innerHTML = `
+                <div>
+                    <strong>${displayText}</strong>
+                </div>
+                <div class="button-group">
+                    <button class="btn btn-primary" onclick="editEndpoint(${index})">Edit</button>
+                    <button class="btn btn-secondary" onclick="testEndpoint('${endpoint.ip}', ${endpoint.port})">Test</button>
+                    <button class="btn btn-danger" onclick="removeEndpoint(${index})">Remove</button>
+                </div>
+            `;
+        }
         container.appendChild(div);
     });
 }
@@ -412,6 +432,68 @@ function addEndpoint() {
 
 function removeEndpoint(index) {
     currentEndpoints.splice(index, 1);
+    displayEndpoints();
+}
+
+function editEndpoint(index) {
+    editingEndpointIndex = index;
+    displayEndpoints();
+}
+
+async function saveEditedEndpoint(index) {
+    const name = document.getElementById(`edit-name-${index}`).value.trim();
+    const ip = document.getElementById(`edit-ip-${index}`).value.trim();
+    const port = parseInt(document.getElementById(`edit-port-${index}`).value);
+    
+    if (!ip || !port) {
+        alert('Please enter both IP and port');
+        return;
+    }
+    
+    // Update the endpoint
+    currentEndpoints[index] = {name, ip, port};
+    editingEndpointIndex = null;
+    
+    // Save to server and restart service
+    try {
+        const filterMode = document.querySelector('input[name="filter-mode"]:checked').value;
+        let icaoList = [];
+        
+        if (filterMode === 'specific') {
+            const input = document.getElementById('icao-input').value;
+            icaoList = input.split(',').map(s => s.trim().toUpperCase()).filter(s => s);
+        }
+        
+        const altitudeFilterEnabled = document.getElementById('altitude-filter-enabled').checked;
+        const maxAltitude = parseInt(document.getElementById('max-altitude').value) || 10000;
+        
+        const response = await fetch('/api/adsb/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                filter_mode: filterMode,
+                icao_list: icaoList,
+                altitude_filter_enabled: altitudeFilterEnabled,
+                max_altitude: maxAltitude,
+                endpoints: currentEndpoints
+            })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            alert('Endpoint updated and ADS-B server restarted');
+            displayEndpoints();
+        } else {
+            alert('Failed to save endpoint');
+        }
+    } catch (error) {
+        console.error('Error saving endpoint:', error);
+        alert('Error saving endpoint');
+    }
+}
+
+function cancelEdit() {
+    editingEndpointIndex = null;
     displayEndpoints();
 }
 

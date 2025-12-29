@@ -3,15 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JLBMaritime Wi-Fi Manager - Login</title>
+    <title>JLBMaritime ADS-B System Manager - Login</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body class="login-page">
     <div class="login-container">
         <div class="login-box">
             <img src="{{ url_for('static', filename='logo.png') }}" alt="JLBMaritime Logo" class="login-logo">
-            <h1>Wi-Fi Manager</h1>
-            <p class="subtitle">ADS-B Management System</p>
+            <h1>ADS-B System Manager</h1>
+            <p class="subtitle">Aircraft Tracking & Wi-Fi Management</p>
             
             {% if error %}
             <div class="error-message">{{ error }}</div>
