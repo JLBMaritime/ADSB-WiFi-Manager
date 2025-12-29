@@ -25,7 +25,7 @@ if [ "$ACTUAL_USER" = "root" ]; then
     exit 1
 fi
 
-INSTALL_DIR="/home/$ACTUAL_USER/AIS-WiFi-Manager"
+INSTALL_DIR="/home/$ACTUAL_USER/ADSB-WiFi-Manager"
 
 echo "Installing for user: $ACTUAL_USER"
 echo "Installation directory: $INSTALL_DIR"
