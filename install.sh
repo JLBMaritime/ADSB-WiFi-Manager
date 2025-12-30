@@ -219,11 +219,29 @@ cp "$INSTALL_DIR/services/web-manager.service" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable web-manager.service
 
-# Install CLI symlink
+# Install CLI tool with line ending fixes
 echo "[10/11] Installing CLI tool..."
+
+# Ensure dos2unix is available for fixing Windows line endings
+if ! command -v dos2unix &> /dev/null; then
+    echo "Installing dos2unix for line ending conversion..."
+    apt-get install -y dos2unix
+fi
+
+# Convert all CLI Python files to Unix format (fixes Windows CRLF issues)
+echo "Converting CLI files to Unix format..."
+dos2unix "$INSTALL_DIR/cli"/*.py 2>/dev/null || true
+
+# Remove old symlink if exists
+rm -f /usr/local/bin/adsb-cli
+
+# Make executable
 chmod +x "$INSTALL_DIR/cli/adsb_cli.py"
-ln -sf "$INSTALL_DIR/cli/adsb_cli.py" /usr/local/bin/adsb-cli
-echo "CLI installed: Type 'adsb-cli' from anywhere to manage the system"
+
+# Create symlink
+ln -s "$INSTALL_DIR/cli/adsb_cli.py" /usr/local/bin/adsb-cli
+
+echo "✓ CLI installed: Type 'adsb-cli' from anywhere to manage the system"
 
 # Configure sudo permissions for web interface
 echo "[11/11] Configuring sudo permissions..."
