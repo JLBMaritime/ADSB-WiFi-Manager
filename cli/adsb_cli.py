@@ -10,8 +10,8 @@ import sys
 import os
 import subprocess
 
-# Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+# Add parent directory to path (resolve symlinks for global installation)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from cli.utils import *
 from cli.wifi_menu import show_wifi_menu
