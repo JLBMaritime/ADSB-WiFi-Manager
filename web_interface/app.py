@@ -255,6 +255,12 @@ def update_adsb_config():
         config = configparser.ConfigParser()
         config.read(ADSB_CONFIG_PATH)
         
+        # Ensure sections exist
+        if not config.has_section('Filter'):
+            config.add_section('Filter')
+        if not config.has_section('Endpoints'):
+            config.add_section('Endpoints')
+        
         # Update filter
         if 'filter_mode' in data:
             config.set('Filter', 'mode', data['filter_mode'])
