@@ -131,6 +131,24 @@
             </div>
 
             <div class="card">
+                <h3>Output Format</h3>
+                <div class="form-group">
+                    <label>
+                        <input type="radio" name="output-format" value="sbs1" onchange="toggleOutputFormat()"> SBS1 Streaming
+                        <small style="display:block; margin-left:20px; color:#aaa;">Real-time SBS1 streaming with altitude state tracking. Best for existing systems.</small>
+                    </label>
+                    <label>
+                        <input type="radio" name="output-format" value="json" onchange="toggleOutputFormat()"> JSON Objects
+                        <small style="display:block; margin-left:20px; color:#aaa;">Individual JSON objects per aircraft. Best for modern apps and easier parsing.</small>
+                    </label>
+                    <label>
+                        <input type="radio" name="output-format" value="json_to_sbs1" onchange="toggleOutputFormat()"> JSON→SBS1 Hybrid
+                        <small style="display:block; margin-left:20px; color:#aaa;">JSON source (complete data) converted to SBS1 output. Best filtering + compatibility.</small>
+                    </label>
+                </div>
+            </div>
+
+            <div class="card">
                 <h3>Aircraft Filter</h3>
                 <div class="form-group">
                     <label>

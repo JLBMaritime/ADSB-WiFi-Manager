@@ -217,6 +217,9 @@ def get_adsb_config():
         config = configparser.ConfigParser()
         config.read(ADSB_CONFIG_PATH)
         
+        # Get output format
+        output_format = config.get('Output', 'format', fallback='sbs1')
+        
         filter_mode = config.get('Filter', 'mode', fallback='all')
         icao_list = config.get('Filter', 'icao_list', fallback='').split(',')
         icao_list = [icao.strip() for icao in icao_list if icao.strip()]
@@ -236,6 +239,7 @@ def get_adsb_config():
                 
         return jsonify({
             'success': True,
+            'output_format': output_format,
             'filter_mode': filter_mode,
             'icao_list': icao_list,
             'altitude_filter_enabled': altitude_filter_enabled,
@@ -256,10 +260,16 @@ def update_adsb_config():
         config.read(ADSB_CONFIG_PATH)
         
         # Ensure sections exist
+        if not config.has_section('Output'):
+            config.add_section('Output')
         if not config.has_section('Filter'):
             config.add_section('Filter')
         if not config.has_section('Endpoints'):
             config.add_section('Endpoints')
+        
+        # Update output format
+        if 'output_format' in data:
+            config.set('Output', 'format', data['output_format'])
         
         # Update filter
         if 'filter_mode' in data:
@@ -449,8 +459,10 @@ if __name__ == '__main__':
     # Create default config if it doesn't exist
     if not os.path.exists(ADSB_CONFIG_PATH):
         config = configparser.ConfigParser()
-        config['Dump1090'] = {'host': '127.0.0.1', 'port': '30003'}
-        config['Filter'] = {'mode': 'specific', 'icao_list': 'A92F2D,A932E4,A9369B,A93A52'}
+        config['Dump1090'] = {'host': '127.0.0.1', 'sbs1_port': '30003', 'json_port': '30047'}
+        config['Output'] = {'format': 'sbs1'}
+        config['Filter'] = {'mode': 'specific', 'icao_list': 'A92F2D,A932E4,A9369B,A93A52', 
+                           'altitude_filter_enabled': 'false', 'max_altitude': '10000'}
         config['Endpoints'] = {'count': '0'}
         with open(ADSB_CONFIG_PATH, 'w') as f:
             config.write(f)

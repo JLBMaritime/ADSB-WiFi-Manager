@@ -331,6 +331,10 @@ async function loadADSBConfig() {
         const data = await response.json();
         
         if (data.success) {
+            // Set output format
+            const outputFormat = data.output_format || 'sbs1';
+            document.querySelector(`input[name="output-format"][value="${outputFormat}"]`).checked = true;
+            
             // Set filter mode
             document.querySelector(`input[name="filter-mode"][value="${data.filter_mode}"]`).checked = true;
             toggleFilterMode();
@@ -359,6 +363,11 @@ function toggleFilterMode() {
     const mode = document.querySelector('input[name="filter-mode"]:checked').value;
     const icaoSection = document.getElementById('icao-filter-section');
     icaoSection.style.display = mode === 'specific' ? 'block' : 'none';
+}
+
+function toggleOutputFormat() {
+    // This function exists for consistency, no dynamic behavior needed yet
+    // All output formats are always available
 }
 
 function toggleAltitudeFilter() {
@@ -456,6 +465,7 @@ async function saveEditedEndpoint(index) {
     
     // Save to server and restart service
     try {
+        const outputFormat = document.querySelector('input[name="output-format"]:checked').value;
         const filterMode = document.querySelector('input[name="filter-mode"]:checked').value;
         let icaoList = [];
         
@@ -471,6 +481,7 @@ async function saveEditedEndpoint(index) {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
+                output_format: outputFormat,
                 filter_mode: filterMode,
                 icao_list: icaoList,
                 altitude_filter_enabled: altitudeFilterEnabled,
@@ -513,6 +524,7 @@ async function testEndpoint(ip, port) {
 }
 
 async function saveADSBConfig() {
+    const outputFormat = document.querySelector('input[name="output-format"]:checked').value;
     const filterMode = document.querySelector('input[name="filter-mode"]:checked').value;
     let icaoList = [];
     
@@ -530,6 +542,7 @@ async function saveADSBConfig() {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
+                output_format: outputFormat,
                 filter_mode: filterMode,
                 icao_list: icaoList,
                 altitude_filter_enabled: altitudeFilterEnabled,
