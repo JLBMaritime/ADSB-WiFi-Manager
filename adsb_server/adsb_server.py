@@ -144,7 +144,7 @@ class ADSBServer:
         self.config['Dump1090'] = {
             'host': '127.0.0.1',
             'sbs1_port': '30003',
-            'json_port': '30047'
+            'json_port': '8080'
         }
         self.config['Output'] = {
             'format': 'sbs1'
@@ -182,14 +182,17 @@ class ADSBServer:
         """Fetch JSON data from dump1090"""
         try:
             host = self.config.get('Dump1090', 'host', fallback='127.0.0.1')
-            json_port = self.config.getint('Dump1090', 'json_port', fallback=30047)
+            json_port = self.config.getint('Dump1090', 'json_port', fallback=8080)
             
             url = f"http://{host}:{json_port}/data/aircraft.json"
             with urllib.request.urlopen(url, timeout=5) as response:
                 data = json.loads(response.read().decode('utf-8'))
                 return data.get('aircraft', [])
+        except urllib.error.URLError as e:
+            self.logger.warning(f"Cannot reach JSON endpoint: {e.reason}")
+            return []
         except Exception as e:
-            self.logger.debug(f"Error fetching JSON: {e}")
+            self.logger.error(f"Error fetching JSON from {url}: {e}")
             return []
     
     def filter_json_aircraft(self, aircraft):
@@ -384,10 +387,19 @@ class ADSBServer:
         """Run in JSON polling mode"""
         self.logger.info("ADS-B Server starting in JSON mode...")
         
+        # Log JSON endpoint
+        host = self.config.get('Dump1090', 'host', fallback='127.0.0.1')
+        json_port = self.config.getint('Dump1090', 'json_port', fallback=8080)
+        url = f"http://{host}:{json_port}/data/aircraft.json"
+        self.logger.info(f"Polling JSON data from: {url}")
+        
         # Connect to endpoints
         self.connect_to_endpoints()
         
         reconnect_time = time.time()
+        stats_time = time.time()
+        first_success = False
+        total_sent = 0
         
         while self.running:
             try:
@@ -399,12 +411,26 @@ class ADSBServer:
                 # Fetch JSON data
                 aircraft_list = self.fetch_json_data()
                 
+                # Log first successful fetch
+                if aircraft_list and not first_success:
+                    self.logger.info(f"✓ Successfully connected to JSON endpoint ({len(aircraft_list)} aircraft visible)")
+                    first_success = True
+                
                 # Filter and forward each aircraft
+                sent_count = 0
                 for aircraft in aircraft_list:
                     if self.filter_json_aircraft(aircraft):
                         # Send as individual JSON object
                         json_str = json.dumps(aircraft) + '\n'
                         self.forward_message(json_str)
+                        sent_count += 1
+                
+                total_sent += sent_count
+                
+                # Log stats every 30 seconds
+                if time.time() - stats_time > 30:
+                    self.logger.info(f"JSON polling: {len(aircraft_list)} aircraft, {sent_count} filtered, {total_sent} total sent")
+                    stats_time = time.time()
                 
                 # Poll every 1 second
                 time.sleep(1)
@@ -419,10 +445,20 @@ class ADSBServer:
         """Run in JSON→SBS1 conversion mode"""
         self.logger.info("ADS-B Server starting in JSON→SBS1 mode...")
         
+        # Log JSON endpoint
+        host = self.config.get('Dump1090', 'host', fallback='127.0.0.1')
+        json_port = self.config.getint('Dump1090', 'json_port', fallback=8080)
+        url = f"http://{host}:{json_port}/data/aircraft.json"
+        self.logger.info(f"Polling JSON data from: {url}")
+        self.logger.info("Converting JSON → SBS1 format")
+        
         # Connect to endpoints
         self.connect_to_endpoints()
         
         reconnect_time = time.time()
+        stats_time = time.time()
+        first_success = False
+        total_sent = 0
         
         while self.running:
             try:
@@ -434,13 +470,27 @@ class ADSBServer:
                 # Fetch JSON data
                 aircraft_list = self.fetch_json_data()
                 
+                # Log first successful fetch
+                if aircraft_list and not first_success:
+                    self.logger.info(f"✓ Successfully connected to JSON endpoint ({len(aircraft_list)} aircraft visible)")
+                    first_success = True
+                
                 # Filter, convert and forward each aircraft
+                sent_count = 0
                 for aircraft in aircraft_list:
                     if self.filter_json_aircraft(aircraft):
                         # Convert to SBS1 and send
                         sbs1_message = self.json_to_sbs1(aircraft)
                         if sbs1_message:
                             self.forward_message(sbs1_message)
+                            sent_count += 1
+                
+                total_sent += sent_count
+                
+                # Log stats every 30 seconds
+                if time.time() - stats_time > 30:
+                    self.logger.info(f"JSON→SBS1: {len(aircraft_list)} aircraft, {sent_count} converted & sent, {total_sent} total")
+                    stats_time = time.time()
                 
                 # Poll every 1 second
                 time.sleep(1)
