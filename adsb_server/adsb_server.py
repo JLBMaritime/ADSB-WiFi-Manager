@@ -85,15 +85,46 @@ class ADSBServer:
             self.altitude_filter_enabled = self.config.getboolean('Filter', 'altitude_filter_enabled', fallback=False)
             self.max_altitude = self.config.getint('Filter', 'max_altitude', fallback=10000)
                 
-            # Load endpoints
-            self.endpoints = []
+            # Load endpoints - preserve existing socket connections
+            old_endpoints = {f"{ep['ip']}:{ep['port']}": ep for ep in self.endpoints}
+            new_endpoints = []
             endpoint_count = self.config.getint('Endpoints', 'count', fallback=0)
+            
             for i in range(endpoint_count):
                 name = self.config.get('Endpoints', f'endpoint_{i}_name', fallback='')
                 ip = self.config.get('Endpoints', f'endpoint_{i}_ip', fallback=None)
                 port = self.config.getint('Endpoints', f'endpoint_{i}_port', fallback=None)
+                
                 if ip and port:
-                    self.endpoints.append({'name': name, 'ip': ip, 'port': port, 'socket': None})
+                    key = f"{ip}:{port}"
+                    # Reuse existing socket if endpoint unchanged
+                    if key in old_endpoints:
+                        new_endpoints.append({
+                            'name': name,
+                            'ip': ip,
+                            'port': port,
+                            'socket': old_endpoints[key]['socket']  # Preserve socket!
+                        })
+                    else:
+                        # New endpoint
+                        new_endpoints.append({
+                            'name': name,
+                            'ip': ip,
+                            'port': port,
+                            'socket': None
+                        })
+            
+            # Close sockets for removed endpoints
+            new_keys = {f"{ep['ip']}:{ep['port']}" for ep in new_endpoints}
+            for key, old_ep in old_endpoints.items():
+                if key not in new_keys and old_ep['socket']:
+                    try:
+                        old_ep['socket'].close()
+                        self.logger.info(f"Closed connection to removed endpoint {key}")
+                    except:
+                        pass
+            
+            self.endpoints = new_endpoints
                     
             self.logger.info(f"Configuration loaded: Filter={'ALL' if self.filter_all else self.filter_icao_list}, Endpoints={len(self.endpoints)}")
             
@@ -122,7 +153,7 @@ class ADSBServer:
     def connect_to_dump1090(self):
         """Connect to dump1090-fa"""
         host = self.config.get('Dump1090', 'host', fallback='127.0.0.1')
-        port = self.config.getint('Dump1090', 'port', fallback=30005)
+        port = self.config.getint('Dump1090', 'port', fallback=30003)
         
         try:
             self.dump1090_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
