@@ -2,6 +2,7 @@
 """
 ADS-B Server - Receives ADS-B data from dump1090-fa and forwards to configured endpoints
 Part of JLBMaritime ADS-B & Wi-Fi Management System
+Supports: SBS1, JSON, and JSON→SBS1 output modes
 """
 
 import socket
@@ -11,6 +12,8 @@ import logging
 import configparser
 import os
 import sys
+import json
+import urllib.request
 from datetime import datetime, timedelta
 
 class ADSBServer:
@@ -25,6 +28,8 @@ class ADSBServer:
         self.altitude_filter_enabled = False
         self.max_altitude = 10000
         self.endpoints = []
+        self.aircraft_states = {}  # Track aircraft altitude for SBS1 mode
+        self.output_format = 'sbs1'  # Default output format
         
         # Setup logging
         self.setup_logging()
@@ -72,6 +77,9 @@ class ADSBServer:
                 self.create_default_config()
                 
             self.config.read(self.config_file)
+            
+            # Load output format
+            self.output_format = self.config.get('Output', 'format', fallback='sbs1')
             
             # Load filter settings
             filter_mode = self.config.get('Filter', 'mode', fallback='all')
@@ -135,7 +143,11 @@ class ADSBServer:
         """Create default configuration file"""
         self.config['Dump1090'] = {
             'host': '127.0.0.1',
-            'port': '30003'
+            'sbs1_port': '30003',
+            'json_port': '30047'
+        }
+        self.config['Output'] = {
+            'format': 'sbs1'
         }
         self.config['Filter'] = {
             'mode': 'specific',
@@ -151,20 +163,77 @@ class ADSBServer:
             self.config.write(f)
             
     def connect_to_dump1090(self):
-        """Connect to dump1090-fa"""
+        """Connect to dump1090-fa SBS1 port"""
         host = self.config.get('Dump1090', 'host', fallback='127.0.0.1')
-        port = self.config.getint('Dump1090', 'port', fallback=30003)
+        port = self.config.getint('Dump1090', 'sbs1_port', fallback=30003)
         
         try:
             self.dump1090_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.dump1090_socket.settimeout(10)
             self.dump1090_socket.connect((host, port))
-            self.logger.info(f"Connected to dump1090-fa at {host}:{port}")
+            self.logger.info(f"Connected to dump1090-fa SBS1 at {host}:{port}")
             return True
         except Exception as e:
             self.logger.error(f"Failed to connect to dump1090-fa: {e}")
             self.dump1090_socket = None
             return False
+    
+    def fetch_json_data(self):
+        """Fetch JSON data from dump1090"""
+        try:
+            host = self.config.get('Dump1090', 'host', fallback='127.0.0.1')
+            json_port = self.config.getint('Dump1090', 'json_port', fallback=30047)
+            
+            url = f"http://{host}:{json_port}/data/aircraft.json"
+            with urllib.request.urlopen(url, timeout=5) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                return data.get('aircraft', [])
+        except Exception as e:
+            self.logger.debug(f"Error fetching JSON: {e}")
+            return []
+    
+    def filter_json_aircraft(self, aircraft):
+        """Filter JSON aircraft object"""
+        try:
+            icao = aircraft.get('hex', '').upper()
+            altitude = aircraft.get('alt_baro') or aircraft.get('alt_geom')
+            
+            # Check altitude filter
+            if self.altitude_filter_enabled and altitude:
+                if altitude > self.max_altitude:
+                    return False
+            
+            # Check ICAO filter
+            if self.filter_all:
+                return True
+            
+            return icao in self.filter_icao_list
+        except:
+            return False
+    
+    def json_to_sbs1(self, aircraft):
+        """Convert JSON aircraft object to SBS1 format"""
+        try:
+            icao = aircraft.get('hex', '').upper()
+            callsign = aircraft.get('flight', '').strip()
+            altitude = aircraft.get('alt_baro') or aircraft.get('alt_geom') or ''
+            speed = aircraft.get('gs') or ''
+            track = aircraft.get('track') or ''
+            lat = aircraft.get('lat') or ''
+            lon = aircraft.get('lon') or ''
+            
+            # Get current timestamp
+            now = datetime.utcnow()
+            date_str = now.strftime('%Y/%m/%d')
+            time_str = now.strftime('%H:%M:%S.%f')[:-3]
+            
+            # SBS1 format
+            sbs1_line = f"MSG,3,1,1,{icao},1,{date_str},{time_str},{date_str},{time_str},{callsign},{altitude},{speed},{track},{lat},{lon}"
+            
+            return sbs1_line + '\n'
+        except Exception as e:
+            self.logger.error(f"JSON→SBS1 conversion error: {e}")
+            return None
             
     def connect_to_endpoints(self):
         """Connect to all configured endpoints"""
@@ -245,10 +314,9 @@ class ADSBServer:
                     # Attempt reconnection in background
                     threading.Thread(target=self.reconnect_endpoint, args=(endpoint,), daemon=True).start()
                     
-    def run(self):
-        """Main server loop"""
-        self.running = True
-        self.logger.info("ADS-B Server starting...")
+    def run_sbs1_mode(self):
+        """Run in SBS1 streaming mode"""
+        self.logger.info("ADS-B Server starting in SBS1 mode...")
         
         while self.running:
             # Connect to dump1090
@@ -311,6 +379,92 @@ class ADSBServer:
                 time.sleep(5)
                 
         self.logger.info("ADS-B Server stopped")
+    
+    def run_json_mode(self):
+        """Run in JSON polling mode"""
+        self.logger.info("ADS-B Server starting in JSON mode...")
+        
+        # Connect to endpoints
+        self.connect_to_endpoints()
+        
+        reconnect_time = time.time()
+        
+        while self.running:
+            try:
+                # Reload config periodically
+                if time.time() - reconnect_time > 30:
+                    self.load_config()
+                    reconnect_time = time.time()
+                
+                # Fetch JSON data
+                aircraft_list = self.fetch_json_data()
+                
+                # Filter and forward each aircraft
+                for aircraft in aircraft_list:
+                    if self.filter_json_aircraft(aircraft):
+                        # Send as individual JSON object
+                        json_str = json.dumps(aircraft) + '\n'
+                        self.forward_message(json_str)
+                
+                # Poll every 1 second
+                time.sleep(1)
+                
+            except Exception as e:
+                self.logger.error(f"JSON mode error: {e}")
+                time.sleep(5)
+        
+        self.logger.info("ADS-B Server stopped")
+    
+    def run_json_to_sbs1_mode(self):
+        """Run in JSON→SBS1 conversion mode"""
+        self.logger.info("ADS-B Server starting in JSON→SBS1 mode...")
+        
+        # Connect to endpoints
+        self.connect_to_endpoints()
+        
+        reconnect_time = time.time()
+        
+        while self.running:
+            try:
+                # Reload config periodically
+                if time.time() - reconnect_time > 30:
+                    self.load_config()
+                    reconnect_time = time.time()
+                
+                # Fetch JSON data
+                aircraft_list = self.fetch_json_data()
+                
+                # Filter, convert and forward each aircraft
+                for aircraft in aircraft_list:
+                    if self.filter_json_aircraft(aircraft):
+                        # Convert to SBS1 and send
+                        sbs1_message = self.json_to_sbs1(aircraft)
+                        if sbs1_message:
+                            self.forward_message(sbs1_message)
+                
+                # Poll every 1 second
+                time.sleep(1)
+                
+            except Exception as e:
+                self.logger.error(f"JSON→SBS1 mode error: {e}")
+                time.sleep(5)
+        
+        self.logger.info("ADS-B Server stopped")
+    
+    def run(self):
+        """Main server loop - routes to appropriate mode"""
+        self.running = True
+        
+        # Log mode selection
+        self.logger.info(f"Starting ADS-B Server in {self.output_format} mode")
+        
+        # Route to appropriate mode
+        if self.output_format == 'json':
+            self.run_json_mode()
+        elif self.output_format == 'json_to_sbs1':
+            self.run_json_to_sbs1_mode()
+        else:  # Default to sbs1
+            self.run_sbs1_mode()
         
     def stop(self):
         """Stop the server"""
