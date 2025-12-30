@@ -219,8 +219,14 @@ cp "$INSTALL_DIR/services/web-manager.service" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable web-manager.service
 
+# Install CLI symlink
+echo "[10/11] Installing CLI tool..."
+chmod +x "$INSTALL_DIR/cli/adsb_cli.py"
+ln -sf "$INSTALL_DIR/cli/adsb_cli.py" /usr/local/bin/adsb-cli
+echo "CLI installed: Type 'adsb-cli' from anywhere to manage the system"
+
 # Configure sudo permissions for web interface
-echo "[10/10] Configuring sudo permissions..."
+echo "[11/11] Configuring sudo permissions..."
 cat > /etc/sudoers.d/adsb-wifi-manager << EOF
 # Allow web interface to control services and Wi-Fi
 www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl start adsb-server
@@ -301,6 +307,10 @@ systemctl is-active adsb-server && echo "  ✓ ADS-B Server: Running" || echo " 
 systemctl is-active web-manager && echo "  ✓ Web Manager: Running" || echo "  ✗ Web Manager: Not Running"
 systemctl is-active dump1090-fa && echo "  ✓ dump1090-fa: Running" || echo "  ✗ dump1090-fa: Not Running (install manually if needed)"
 echo ""
+echo "Remote Access:"
+echo "  - SSH: ssh JLBMaritime@ADS-B.local"
+echo "  - CLI Tool: Type 'adsb-cli' to manage via terminal"
+echo ""
 echo "Next Steps:"
 echo "  1. Connect to Wi-Fi hotspot 'JLBMaritime-ADSB' (password: Admin123)"
 echo "  2. Open browser to http://ADS-B.local"
@@ -308,6 +318,8 @@ echo "  3. Login with JLBMaritime / Admin"
 echo "  4. Configure your internet Wi-Fi in the Wi-Fi Manager tab"
 echo "  5. Configure ADS-B endpoints in the ADS-B Configuration tab"
 echo "  6. Place logo.png file in: $INSTALL_DIR/web_interface/static/"
+echo "  7. For remote SSH access: ssh JLBMaritime@ADS-B.local"
+echo "  8. Run 'adsb-cli' for interactive terminal management"
 echo ""
 echo "Reboot recommended: sudo reboot"
 echo "=========================================="
