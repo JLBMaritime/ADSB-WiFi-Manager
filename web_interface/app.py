@@ -11,7 +11,8 @@ import configparser
 import subprocess
 import json
 from functools import wraps
-from datetime import datetime
+from datetime import datetime, timedelta
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -20,11 +21,34 @@ from wifi_manager.wifi_controller import WiFiController
 app = Flask(__name__)
 app.secret_key = 'jlbmaritime-adsb-secret-key-change-in-production'
 
-# Configuration paths
+# Production mode detection
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+PRODUCTION_MODE = os.path.exists(os.path.join(BASE_DIR, '.production_mode'))
+
+# Configure for production if behind reverse proxy
+if PRODUCTION_MODE:
+    app.wsgi_app = ProxyFix(
+        app.wsgi_app,
+        x_for=1,
+        x_proto=1,
+        x_host=1,
+        x_port=1,
+        x_prefix=1
+    )
+    
+    # Enhanced session security for production
+    app.config.update(
+        SESSION_COOKIE_SECURE=True,  # HTTPS only
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE='Lax',
+        PERMANENT_SESSION_LIFETIME=timedelta(hours=12)
+    )
+
+# Configuration paths
 ADSB_CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'adsb_server_config.conf')
 WEB_CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'web_config.conf')
 LOG_PATH = os.path.join(BASE_DIR, 'logs', 'adsb_server.log')
+
 
 # Initialize WiFi controller
 wifi = WiFiController('wlan0')
@@ -74,6 +98,15 @@ def logout():
 def index():
     """Main dashboard page"""
     return render_template('index.html')
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint for monitoring (no auth required)"""
+    return jsonify({
+        'status': 'healthy',
+        'production_mode': PRODUCTION_MODE,
+        'timestamp': datetime.now().isoformat()
+    })
 
 # ============= API ENDPOINTS =============
 
