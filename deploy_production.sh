@@ -55,6 +55,16 @@ echo "[2/10] Installing nginx..."
 apt-get update
 apt-get install -y nginx
 
+# Reconfigure lighttpd to use port 8080 (not port 80)
+echo "[2.5/10] Reconfiguring lighttpd for port 8080..."
+if systemctl is-active --quiet lighttpd; then
+    systemctl stop lighttpd
+fi
+if [ -f /etc/lighttpd/lighttpd.conf ]; then
+    sed -i 's/server.port = 80/server.port = 8080/' /etc/lighttpd/lighttpd.conf
+    echo "✓ lighttpd reconfigured for port 8080"
+fi
+
 # Stop nginx for configuration
 systemctl stop nginx
 
@@ -97,6 +107,14 @@ sed -i 's/--host 0.0.0.0/--host 127.0.0.1/g' /etc/systemd/system/web-manager.ser
 # Reload systemd
 systemctl daemon-reload
 
+# Set directory permissions for nginx access
+echo "[6.5/10] Setting directory permissions..."
+chmod 755 /home/$ACTUAL_USER
+chmod 755 "$INSTALL_DIR"
+chmod 755 "$INSTALL_DIR/web_interface"
+chmod 755 "$INSTALL_DIR/web_interface/static"
+echo "✓ Directory permissions set"
+
 # Configure firewall
 echo "[7/10] Configuring firewall (UFW)..."
 
@@ -117,6 +135,9 @@ ufw allow 80/tcp comment 'HTTP'
 # Allow HTTPS
 ufw allow 443/tcp comment 'HTTPS'
 
+# Allow dump1090 SkyAware (lighttpd JSON endpoint)
+ufw allow 8080/tcp comment 'dump1090 SkyAware'
+
 # Allow mDNS
 ufw allow 5353/udp comment 'mDNS'
 
@@ -125,6 +146,13 @@ echo "y" | ufw enable
 
 # Start services
 echo "[8/10] Starting services..."
+
+# Start lighttpd on port 8080
+if [ -f /etc/lighttpd/lighttpd.conf ]; then
+    systemctl enable lighttpd
+    systemctl start lighttpd
+    echo "✓ lighttpd started on port 8080"
+fi
 
 # Restart web-manager service
 systemctl restart web-manager

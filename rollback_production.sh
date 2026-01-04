@@ -47,6 +47,13 @@ echo "[2/7] Removing nginx configuration..."
 rm -f /etc/nginx/sites-enabled/adsb-manager.conf
 rm -f /etc/nginx/sites-available/adsb-manager.conf
 
+echo "[2.5/7] Reverting lighttpd to port 80..."
+if [ -f /etc/lighttpd/lighttpd.conf ]; then
+    sed -i 's/server.port = 8080/server.port = 80/' /etc/lighttpd/lighttpd.conf
+    systemctl restart lighttpd || true
+    echo "✓ lighttpd reverted to port 80"
+fi
+
 echo "[3/7] Updating Flask to bind to all interfaces..."
 sed -i 's/--host 127.0.0.1/--host 0.0.0.0/g' /etc/systemd/system/web-manager.service || true
 systemctl daemon-reload
