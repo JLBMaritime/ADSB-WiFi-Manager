@@ -141,6 +141,11 @@ ufw allow 8080/tcp comment 'dump1090 SkyAware'
 # Allow mDNS
 ufw allow 5353/udp comment 'mDNS'
 
+# Allow DHCP on wlan1 (hotspot interface)
+ufw allow in on wlan1 to any port 67 proto udp comment 'DHCP Server on wlan1'
+ufw allow in on wlan1 to any port 68 proto udp comment 'DHCP Client on wlan1'
+ufw allow in on wlan1 from 192.168.4.0/24 comment 'Hotspot network wlan1'
+
 # Enable firewall
 echo "y" | ufw enable
 

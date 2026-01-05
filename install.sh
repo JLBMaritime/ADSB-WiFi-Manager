@@ -217,6 +217,28 @@ EOF
 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 sysctl -p
 
+# Configure firewall for hotspot
+echo "[8.5/11] Configuring firewall for hotspot..."
+if command -v ufw &> /dev/null; then
+    echo "Configuring UFW firewall rules..."
+    
+    # Allow DHCP on wlan1 hotspot interface
+    ufw allow in on wlan1 to any port 67 proto udp comment 'DHCP Server on wlan1' || true
+    ufw allow in on wlan1 to any port 68 proto udp comment 'DHCP Client on wlan1' || true
+    ufw allow in on wlan1 from 192.168.4.0/24 comment 'Hotspot network wlan1' || true
+    
+    # Reload firewall if it's enabled
+    if ufw status | grep -q "Status: active"; then
+        echo "Reloading firewall..."
+        ufw reload
+        echo "✓ Firewall rules added for hotspot DHCP"
+    else
+        echo "Note: UFW is not enabled. Firewall rules added but not active."
+    fi
+else
+    echo "UFW not installed. Skipping firewall configuration."
+fi
+
 # Install systemd services
 echo "[9/10] Installing systemd services..."
 
