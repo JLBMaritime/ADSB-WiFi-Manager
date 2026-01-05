@@ -124,9 +124,25 @@ mv /etc/dnsmasq.conf /etc/dnsmasq.conf.backup || true
 cat > /etc/dnsmasq.conf << EOF
 # JLBMaritime ADS-B DNS/DHCP Configuration
 interface=wlan1
+bind-interfaces
+domain-needed
+bogus-priv
+
+# DHCP Settings
 dhcp-range=192.168.4.10,192.168.4.50,255.255.255.0,24h
-domain=local
+dhcp-option=3,192.168.4.1        # Gateway/Router
+dhcp-option=6,192.168.4.1        # DNS Server
+dhcp-authoritative
+
+# DNS Settings
+server=8.8.8.8
+server=8.8.4.4
 address=/ADS-B.local/192.168.4.1
+domain=local
+
+# Logging (optional - disable in production)
+# log-queries
+# log-dhcp
 EOF
 
 # Configure wlan1 static IP
