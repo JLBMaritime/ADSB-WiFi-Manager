@@ -71,25 +71,57 @@ async function refreshDashboard() {
         console.error('Error refreshing dashboard:', error);
     }
     
-    // Load TCP Endpoints summary
+    // Load ADS-B Configuration and TCP Endpoints summary
     try {
         const response = await fetch('/api/adsb/config');
         const data = await response.json();
         
-        const container = document.getElementById('endpoints-summary');
-        if (data.success && data.endpoints && data.endpoints.length > 0) {
-            let html = `<p><strong>${data.endpoints.length} endpoint${data.endpoints.length !== 1 ? 's' : ''} configured</strong></p><ul style="margin: 10px 0; padding-left: 20px;">`;
-            data.endpoints.forEach(endpoint => {
-                const displayText = endpoint.name ? `${endpoint.name} - ${endpoint.ip}:${endpoint.port}` : `${endpoint.ip}:${endpoint.port}`;
-                html += `<li>${displayText}</li>`;
-            });
-            html += '</ul>';
-            container.innerHTML = html;
-        } else {
-            container.innerHTML = '<p>No TCP endpoints configured</p>';
+        if (data.success) {
+            // Output Format
+            const formatNames = {
+                'sbs1': 'SBS1 Streaming',
+                'json': 'JSON Objects',
+                'json_to_sbs1': 'JSON→SBS1 Hybrid'
+            };
+            const outputFormat = data.output_format || 'sbs1';
+            document.getElementById('config-output-format').textContent = formatNames[outputFormat] || outputFormat;
+            
+            // Aircraft Filter
+            let filterText = 'ALL Aircraft';
+            if (data.filter_mode === 'specific' && data.icao_list && data.icao_list.length > 0) {
+                const count = data.icao_list.length;
+                const preview = data.icao_list.slice(0, 2).join(', ');
+                filterText = `${count} ICAO${count !== 1 ? 's' : ''}: ${preview}${count > 2 ? '...' : ''}`;
+            }
+            document.getElementById('config-aircraft-filter').textContent = filterText;
+            
+            // Altitude Filter
+            let altitudeText = 'Disabled';
+            if (data.altitude_filter_enabled) {
+                const maxAlt = data.max_altitude || 10000;
+                altitudeText = `Enabled (Max: ${maxAlt.toLocaleString()} ft)`;
+            }
+            document.getElementById('config-altitude-filter').textContent = altitudeText;
+            
+            // TCP Endpoints
+            const epContainer = document.getElementById('endpoints-summary');
+            if (data.endpoints && data.endpoints.length > 0) {
+                let html = `<p><strong>${data.endpoints.length} endpoint${data.endpoints.length !== 1 ? 's' : ''} configured</strong></p><ul style="margin: 10px 0; padding-left: 20px;">`;
+                data.endpoints.forEach(endpoint => {
+                    const displayText = endpoint.name ? `${endpoint.name} - ${endpoint.ip}:${endpoint.port}` : `${endpoint.ip}:${endpoint.port}`;
+                    html += `<li>${displayText}</li>`;
+                });
+                html += '</ul>';
+                epContainer.innerHTML = html;
+            } else {
+                epContainer.innerHTML = '<p>No TCP endpoints configured</p>';
+            }
         }
     } catch (error) {
-        console.error('Error loading endpoints summary:', error);
+        console.error('Error loading ADS-B config summary:', error);
+        document.getElementById('config-output-format').textContent = 'Error loading';
+        document.getElementById('config-aircraft-filter').textContent = 'Error loading';
+        document.getElementById('config-altitude-filter').textContent = 'Error loading';
         document.getElementById('endpoints-summary').innerHTML = '<p>Error loading endpoints</p>';
     }
 }
