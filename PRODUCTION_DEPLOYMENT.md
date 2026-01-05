@@ -254,8 +254,10 @@ https://192.168.4.1
 Protocols: TLS 1.2, TLS 1.3
 Key Size: 4096-bit RSA
 Cipher Suites: Modern, secure only
-Certificate Validity: 10 years
+Certificate Validity: 365 days (1 year)
 ```
+
+**Note:** Certificate validity is limited to 365 days to comply with modern browser security requirements. You'll need to renew annually (see [Maintenance](#maintenance) section).
 
 ### HTTP Security Headers
 
@@ -473,17 +475,58 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-### Renew Certificate
+### Renew SSL Certificate
 
-Certificate is valid for 10 years, but to regenerate:
+**Certificate Validity:** 365 days (1 year)
+
+Browsers will start showing warnings a few weeks before the certificate expires. You'll need to regenerate the certificate annually.
+
+#### Method 1: Automated Script (Recommended)
+
+Use the provided renewal script:
 
 ```bash
+cd ~/ADSB-WiFi-Manager
+sudo ./fix_ssl_certificate.sh
+```
+
+**What the script does:**
+- Backs up old certificate
+- Generates new 365-day certificate
+- Installs to system location
+- Restarts nginx
+- Verifies everything works
+
+**Time Required:** ~30 seconds
+
+#### Method 2: Manual Renewal
+
+If you prefer manual control:
+
+```bash
+# Generate new certificate
 cd ~/ADSB-WiFi-Manager/ssl
 sudo ./generate_self_signed.sh
+
+# Install to system
 sudo cp adsb-manager.crt /etc/ssl/adsb-manager/
 sudo cp adsb-manager.key /etc/ssl/adsb-manager/
+sudo chmod 600 /etc/ssl/adsb-manager/adsb-manager.key
+sudo chmod 644 /etc/ssl/adsb-manager/adsb-manager.crt
+
+# Restart nginx
 sudo systemctl restart nginx
 ```
+
+#### After Renewal
+
+**Important:** After renewing the certificate, each device will see the certificate warning ONE more time (just like the first time). Simply accept the new certificate and you're good for another year.
+
+#### Set a Reminder
+
+Set a calendar reminder for **11 months from deployment** to renew the certificate before it expires.
+
+**Why 365 days?** Modern browsers (Chrome, Safari, Firefox) require SSL certificates to have a maximum validity of 398 days for security reasons.
 
 ### Update nginx Configuration
 

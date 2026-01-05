@@ -1,7 +1,8 @@
 #!/bin/bash
 ################################################################################
 # Generate Self-Signed SSL Certificate for ADS-B Manager
-# 10-year validity, 4096-bit RSA key
+# 1-year validity (365 days) - compliant with modern browser requirements
+# 4096-bit RSA key
 ################################################################################
 
 echo "Generating self-signed SSL certificate..."
@@ -13,7 +14,7 @@ CERT_CITY="London"
 CERT_ORG="JLBMaritime"
 CERT_OU="ADS-B Manager"
 CERT_CN="ADS-B.local"
-CERT_DAYS=3650  # 10 years
+CERT_DAYS=365  # 1 year (max allowed by modern browsers)
 
 # File names
 KEY_FILE="adsb-manager.key"
@@ -80,4 +81,6 @@ echo "  - ADS-B"
 echo "  - 192.168.4.1"
 echo "  - 127.0.0.1"
 echo ""
-echo "Validity: $CERT_DAYS days (10 years)"
+echo "Validity: $CERT_DAYS days (1 year)"
+echo ""
+echo "Note: Certificate validity limited to 365 days for browser compatibility"
