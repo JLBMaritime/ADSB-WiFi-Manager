@@ -99,7 +99,9 @@ This system provides a complete ADS-B (Automatic Dependent Surveillance-Broadcas
 
 ## 📦 Installation
 
-### Automated Installation
+### Standard Installation (HTTP-Only - Recommended)
+
+The default installation provides HTTP-only access - perfect for private hotspot use with maximum browser compatibility.
 
 1. **Clone the repository** to your Raspberry Pi:
    ```bash
@@ -124,8 +126,9 @@ The automated installer handles everything:
 - ✅ System package updates
 - ✅ Python3 and Flask web framework
 - ✅ dump1090-fa for ADS-B reception
-- ✅ hostapd and dnsmasq for WiFi hotspot
+- ✅ hostapd and dnsmasq for WiFi hotspot (with iOS-compatible DHCP)
 - ✅ Avahi daemon for mDNS (ADS-B.local)
+- ✅ UFW firewall with hotspot DHCP rules
 - ✅ dos2unix for line ending conversion
 - ✅ Systemd services for auto-start
 - ✅ wlan1 hotspot configuration (192.168.4.1)
@@ -133,6 +136,19 @@ The automated installer handles everything:
 - ✅ Hostname set to "ADS-B"
 
 **Installation Time**: 15-30 minutes (depending on internet speed)
+
+**Access After Install**: `http://ADS-B.local:5000` or `http://192.168.4.1:5000`
+
+### Optional: HTTPS with SSL (Advanced)
+
+If you need HTTPS encryption with self-signed certificates, see:
+```
+optional/ssl-deployment/README.md
+```
+
+**Note**: HTTPS adds browser certificate warnings and annual renewal. Only recommended if you specifically need SSL encryption. The standard HTTP installation is secure enough for private hotspot use.
+
+See [DEPLOYMENT_MODE.md](DEPLOYMENT_MODE.md) for security considerations.
 
 ---
 
@@ -692,7 +708,21 @@ sudo truncate -s 0 ~/ADSB-WiFi-Manager/logs/adsb_server.log
 │   └── wlan1-config.service     # wlan1 setup service
 ├── logs/
 │   └── adsb_server.log          # Application logs
-├── install.sh                   # Installation script
+├── optional/                    # Advanced/optional features
+│   └── ssl-deployment/          # HTTPS with SSL (optional)
+│       ├── README.md            # SSL deployment guide
+│       ├── deploy_production.sh # Deploy HTTPS
+│       ├── rollback_production.sh # Return to HTTP
+│       ├── fix_ssl_certificate.sh # Renew certificate
+│       ├── PRODUCTION_DEPLOYMENT.md # Detailed docs
+│       ├── ssl/
+│       │   └── generate_self_signed.sh
+│       └── nginx/
+│           └── adsb-manager.conf
+├── install.sh                   # Main installation script (HTTP-only)
+├── fix_hotspot_dhcp.sh         # DHCP troubleshooting
+├── fix_hotspot_firewall.sh     # Firewall troubleshooting
+├── DEPLOYMENT_MODE.md           # HTTP-only deployment rationale
 └── README.md                    # This file
 ```
 
