@@ -1,0 +1,44 @@
+[Unit]
+Description=Web Management Interface - ADS-B WiFi Manager
+Documentation=https://github.com/jlbmaritime/adsb-wifi-manager
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=JLBMaritime
+WorkingDirectory=/home/JLBMaritime/ADSB-WiFi-Manager/web_interface
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/usr/bin/python3 /home/JLBMaritime/ADSB-WiFi-Manager/web_interface/app.py
+StandardOutput=journal
+StandardError=journal
+
+# Stability improvements
+Restart=always
+RestartSec=10s
+StartLimitInterval=300s
+StartLimitBurst=5
+
+# Watchdog (5 minute timeout - web can be idle)
+WatchdogSec=300
+NotifyAccess=main
+
+# Resource limits
+MemoryLimit=256M
+TasksMax=10
+LimitNOFILE=128
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/JLBMaritime/ADSB-WiFi-Manager/logs /home/JLBMaritime/ADSB-WiFi-Manager/config
+
+# Graceful shutdown
+TimeoutStopSec=15s
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

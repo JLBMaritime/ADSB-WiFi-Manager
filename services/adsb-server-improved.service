@@ -1,0 +1,44 @@
+[Unit]
+Description=ADS-B Server - Aircraft Data Receiver and Forwarder
+Documentation=https://github.com/jlbmaritime/adsb-wifi-manager
+After=network-online.target dump1090-fa.service
+Wants=network-online.target
+Requires=dump1090-fa.service
+
+[Service]
+Type=simple
+User=JLBMaritime
+WorkingDirectory=/home/JLBMaritime/ADSB-WiFi-Manager
+ExecStart=/usr/bin/python3 /home/JLBMaritime/ADSB-WiFi-Manager/adsb_server/adsb_server.py
+StandardOutput=journal
+StandardError=journal
+
+# Stability improvements
+Restart=always
+RestartSec=10s
+StartLimitInterval=300s
+StartLimitBurst=5
+
+# Watchdog to detect hangs (2 minute timeout)
+WatchdogSec=120
+NotifyAccess=main
+
+# Resource limits to prevent runaway processes
+MemoryLimit=512M
+TasksMax=20
+LimitNOFILE=256
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/JLBMaritime/ADSB-WiFi-Manager/logs /home/JLBMaritime/ADSB-WiFi-Manager/config
+
+# Graceful shutdown
+TimeoutStopSec=30s
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

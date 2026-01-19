@@ -4,6 +4,9 @@
 # Web Framework
 Flask==3.0.0
 
+# System Resource Monitoring (for stability improvements)
+psutil==5.9.8
+
 # Note: These packages are typically pre-installed in Raspberry Pi OS
 # or will be handled by the installation script:
 # - Standard library modules (socket, subprocess, configparser, etc.)
