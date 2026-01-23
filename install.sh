@@ -67,7 +67,9 @@ fi
 
 # Install Python packages
 echo "[4/10] Installing Python packages..."
-pip3 install flask --break-system-packages || pip3 install flask
+pip3 install flask psutil --break-system-packages || pip3 install flask psutil
+echo "✓ Installed Flask (web framework)"
+echo "✓ Installed psutil (resource monitoring for stability)"
 
 # Copy application files
 echo "[5/10] Copying application files..."
