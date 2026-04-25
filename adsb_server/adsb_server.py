@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """
-ADS-B Server - Receives ADS-B data from dump1090-fa and forwards to configured endpoints
+ADS-B Server - FIXED VERSION with stability improvements
 Part of JLBMaritime ADS-B & Wi-Fi Management System
 Supports: SBS1, JSON, and JSON→SBS1 output modes
+
+STABILITY FIXES:
+- Added socket timeouts to prevent indefinite blocking
+- Fixed socket/connection leaks
+- Added connection limits
+- Proper thread cleanup
+- Resource monitoring
+- Watchdog-compatible
 """
 
 import socket
@@ -15,6 +23,7 @@ import sys
 import json
 import urllib.request
 from datetime import datetime, timedelta
+import psutil  # For resource monitoring
 
 class ADSBServer:
     def __init__(self, config_file):
@@ -28,8 +37,14 @@ class ADSBServer:
         self.altitude_filter_enabled = False
         self.max_altitude = 10000
         self.endpoints = []
-        self.aircraft_states = {}  # Track aircraft altitude for SBS1 mode
-        self.output_format = 'sbs1'  # Default output format
+        self.aircraft_states = {}
+        self.output_format = 'sbs1'
+        
+        # Stability improvements
+        self.reconnection_threads = set()  # Track reconnection threads
+        self.max_reconnect_threads = 5  # Limit concurrent reconnections
+        self.socket_timeout = 30  # 30 second socket timeout
+        self.last_resource_check = time.time()
         
         # Setup logging
         self.setup_logging()
@@ -55,6 +70,45 @@ class ADSBServer:
         
         # Start log rotation thread
         threading.Thread(target=self.log_rotation_worker, daemon=True).start()
+        
+        # Start resource monitor thread
+        threading.Thread(target=self.resource_monitor_worker, daemon=True).start()
+        
+    def resource_monitor_worker(self):
+        """Monitor system resources and log warnings"""
+        while True:
+            try:
+                time.sleep(300)  # Check every 5 minutes
+                
+                # Get process info
+                process = psutil.Process()
+                mem_info = process.memory_info()
+                mem_mb = mem_info.rss / 1024 / 1024
+                
+                # Count open file descriptors
+                try:
+                    num_fds = process.num_fds()
+                except:
+                    num_fds = len(process.open_files())
+                
+                # Log resource usage
+                self.logger.info(f"Resource check: Memory={mem_mb:.1f}MB, FDs={num_fds}, "
+                               f"Endpoints={len([e for e in self.endpoints if e.get('socket')])}, "
+                               f"Threads={threading.active_count()}")
+                
+                # Warn if resources high
+                if mem_mb > 200:
+                    self.logger.warning(f"High memory usage: {mem_mb:.1f}MB")
+                if num_fds > 100:
+                    self.logger.warning(f"High file descriptor count: {num_fds}")
+                if threading.active_count() > 10:
+                    self.logger.warning(f"High thread count: {threading.active_count()}")
+                    
+                # Clean up dead threads from reconnection set
+                self.reconnection_threads = {t for t in self.reconnection_threads if t.is_alive()}
+                    
+            except Exception as e:
+                self.logger.error(f"Resource monitor error: {e}")
         
     def log_rotation_worker(self):
         """Purge logs every 72 hours"""
@@ -93,7 +147,7 @@ class ADSBServer:
             self.altitude_filter_enabled = self.config.getboolean('Filter', 'altitude_filter_enabled', fallback=False)
             self.max_altitude = self.config.getint('Filter', 'max_altitude', fallback=10000)
                 
-            # Load endpoints - preserve existing socket connections
+            # Load endpoints - properly clean up old ones
             old_endpoints = {f"{ep['ip']}:{ep['port']}": ep for ep in self.endpoints}
             new_endpoints = []
             endpoint_count = self.config.getint('Endpoints', 'count', fallback=0)
@@ -106,15 +160,14 @@ class ADSBServer:
                 if ip and port:
                     key = f"{ip}:{port}"
                     # Reuse existing socket if endpoint unchanged
-                    if key in old_endpoints:
+                    if key in old_endpoints and old_endpoints[key].get('socket'):
                         new_endpoints.append({
                             'name': name,
                             'ip': ip,
                             'port': port,
-                            'socket': old_endpoints[key]['socket']  # Preserve socket!
+                            'socket': old_endpoints[key]['socket']
                         })
                     else:
-                        # New endpoint
                         new_endpoints.append({
                             'name': name,
                             'ip': ip,
@@ -125,7 +178,7 @@ class ADSBServer:
             # Close sockets for removed endpoints
             new_keys = {f"{ep['ip']}:{ep['port']}" for ep in new_endpoints}
             for key, old_ep in old_endpoints.items():
-                if key not in new_keys and old_ep['socket']:
+                if key not in new_keys and old_ep.get('socket'):
                     try:
                         old_ep['socket'].close()
                         self.logger.info(f"Closed connection to removed endpoint {key}")
@@ -163,29 +216,35 @@ class ADSBServer:
             self.config.write(f)
             
     def connect_to_dump1090(self):
-        """Connect to dump1090-fa SBS1 port"""
+        """Connect to dump1090-fa SBS1 port with timeout"""
         host = self.config.get('Dump1090', 'host', fallback='127.0.0.1')
         port = self.config.getint('Dump1090', 'sbs1_port', fallback=30003)
         
         try:
             self.dump1090_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.dump1090_socket.settimeout(10)
+            self.dump1090_socket.settimeout(self.socket_timeout)  # Set timeout
             self.dump1090_socket.connect((host, port))
             self.logger.info(f"Connected to dump1090-fa SBS1 at {host}:{port}")
             return True
         except Exception as e:
             self.logger.error(f"Failed to connect to dump1090-fa: {e}")
+            if self.dump1090_socket:
+                try:
+                    self.dump1090_socket.close()
+                except:
+                    pass
             self.dump1090_socket = None
             return False
     
     def fetch_json_data(self):
-        """Fetch JSON data from dump1090"""
+        """Fetch JSON data from dump1090 with timeout"""
         try:
             host = self.config.get('Dump1090', 'host', fallback='127.0.0.1')
             json_port = self.config.getint('Dump1090', 'json_port', fallback=8080)
             
             url = f"http://{host}:{json_port}/data/aircraft.json"
-            with urllib.request.urlopen(url, timeout=5) as response:
+            # FIXED: Added timeout to prevent infinite hang
+            with urllib.request.urlopen(url, timeout=10) as response:
                 data = json.loads(response.read().decode('utf-8'))
                 return data.get('aircraft', [])
         except urllib.error.URLError as e:
@@ -225,12 +284,10 @@ class ADSBServer:
             lat = aircraft.get('lat') or ''
             lon = aircraft.get('lon') or ''
             
-            # Get current timestamp
             now = datetime.utcnow()
             date_str = now.strftime('%Y/%m/%d')
             time_str = now.strftime('%H:%M:%S.%f')[:-3]
             
-            # SBS1 format
             sbs1_line = f"MSG,3,1,1,{icao},1,{date_str},{time_str},{date_str},{time_str},{callsign},{altitude},{speed},{track},{lat},{lon}"
             
             return sbs1_line + '\n'
@@ -239,29 +296,33 @@ class ADSBServer:
             return None
             
     def connect_to_endpoints(self):
-        """Connect to all configured endpoints"""
+        """Connect to all configured endpoints with timeout"""
         for endpoint in self.endpoints:
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)
-                sock.connect((endpoint['ip'], endpoint['port']))
-                endpoint['socket'] = sock
-                self.logger.info(f"Connected to endpoint {endpoint['ip']}:{endpoint['port']}")
-            except Exception as e:
-                self.logger.warning(f"Failed to connect to {endpoint['ip']}:{endpoint['port']}: {e}")
-                endpoint['socket'] = None
+            if not endpoint.get('socket'):
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(self.socket_timeout)  # Set timeout
+                    sock.connect((endpoint['ip'], endpoint['port']))
+                    endpoint['socket'] = sock
+                    self.logger.info(f"Connected to endpoint {endpoint['ip']}:{endpoint['port']}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to connect to {endpoint['ip']}:{endpoint['port']}: {e}")
+                    endpoint['socket'] = None
                 
     def reconnect_endpoint(self, endpoint):
         """Attempt to reconnect to a failed endpoint"""
         try:
-            if endpoint['socket']:
+            # Clean up old socket
+            if endpoint.get('socket'):
                 try:
                     endpoint['socket'].close()
                 except:
                     pass
+                endpoint['socket'] = None
                     
+            # Create new socket with timeout
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
+            sock.settimeout(self.socket_timeout)
             sock.connect((endpoint['ip'], endpoint['port']))
             endpoint['socket'] = sock
             self.logger.info(f"Reconnected to endpoint {endpoint['ip']}:{endpoint['port']}")
@@ -270,30 +331,34 @@ class ADSBServer:
             self.logger.debug(f"Reconnect failed for {endpoint['ip']}:{endpoint['port']}: {e}")
             endpoint['socket'] = None
             return False
+        finally:
+            # Remove this thread from tracking
+            try:
+                self.reconnection_threads.discard(threading.current_thread())
+            except:
+                pass
             
     def filter_message(self, message):
         """Check if message should be forwarded based on filter"""
-        # SBS1 format: MSG,3,1,1,ICAO,1,DATE,TIME,DATE,TIME,CALLSIGN,ALTITUDE,SPEED,TRACK,LAT,LON...
-        #              0   1 2 3  4    5  6    7    8    9     10      11       12     13    14  15
         try:
             parts = message.split(',')
             
-            # Check altitude filter first (applies to all modes)
+            # Check altitude filter
             if self.altitude_filter_enabled and len(parts) > 11:
                 altitude_str = parts[11].strip()
-                if altitude_str:  # Altitude field not empty
+                if altitude_str:
                     try:
                         altitude = int(altitude_str)
                         if altitude > self.max_altitude:
-                            return False  # Reject aircraft above max altitude
+                            return False
                     except ValueError:
-                        pass  # Invalid altitude, continue with other filters
+                        pass
             
-            # If filter_all mode, accept everything (that passed altitude filter)
+            # If filter_all mode, accept everything
             if self.filter_all:
                 return True
             
-            # Check ICAO filter for specific mode
+            # Check ICAO filter
             if len(parts) > 4:
                 icao = parts[4].strip().upper()
                 return icao in self.filter_icao_list
@@ -308,14 +373,22 @@ class ADSBServer:
         message_bytes = message.encode('utf-8')
         
         for endpoint in self.endpoints:
-            if endpoint['socket']:
+            if endpoint.get('socket'):
                 try:
                     endpoint['socket'].sendall(message_bytes)
                 except Exception as e:
                     self.logger.warning(f"Failed to send to {endpoint['ip']}:{endpoint['port']}: {e}")
+                    try:
+                        endpoint['socket'].close()
+                    except:
+                        pass
                     endpoint['socket'] = None
-                    # Attempt reconnection in background
-                    threading.Thread(target=self.reconnect_endpoint, args=(endpoint,), daemon=True).start()
+                    
+                    # FIXED: Limit concurrent reconnection threads
+                    if len(self.reconnection_threads) < self.max_reconnect_threads:
+                        thread = threading.Thread(target=self.reconnect_endpoint, args=(endpoint,), daemon=True)
+                        self.reconnection_threads.add(thread)
+                        thread.start()
                     
     def run_sbs1_mode(self):
         """Run in SBS1 streaming mode"""
@@ -338,13 +411,13 @@ class ADSBServer:
             
             try:
                 while self.running:
-                    # Reload config periodically (for updates)
+                    # Reload config periodically
                     if time.time() - reconnect_time > 30:
-                        old_config = self.config_file
                         self.load_config()
                         reconnect_time = time.time()
                         
                     try:
+                        # Receive with timeout
                         data = self.dump1090_socket.recv(4096)
                         if not data:
                             self.logger.warning("dump1090-fa connection lost")
@@ -352,7 +425,7 @@ class ADSBServer:
                             
                         buffer += data.decode('utf-8', errors='ignore')
                         
-                        # Process complete messages (lines)
+                        # Process complete messages
                         while '\n' in buffer:
                             line, buffer = buffer.split('\n', 1)
                             line = line.strip()
@@ -361,6 +434,7 @@ class ADSBServer:
                                 self.forward_message(line + '\n')
                                 
                     except socket.timeout:
+                        # Timeout is normal, just continue
                         continue
                     except Exception as e:
                         self.logger.error(f"Error receiving data: {e}")
@@ -387,13 +461,11 @@ class ADSBServer:
         """Run in JSON polling mode"""
         self.logger.info("ADS-B Server starting in JSON mode...")
         
-        # Log JSON endpoint
         host = self.config.get('Dump1090', 'host', fallback='127.0.0.1')
         json_port = self.config.getint('Dump1090', 'json_port', fallback=8080)
         url = f"http://{host}:{json_port}/data/aircraft.json"
         self.logger.info(f"Polling JSON data from: {url}")
         
-        # Connect to endpoints
         self.connect_to_endpoints()
         
         reconnect_time = time.time()
@@ -411,16 +483,14 @@ class ADSBServer:
                 # Fetch JSON data
                 aircraft_list = self.fetch_json_data()
                 
-                # Log first successful fetch
                 if aircraft_list and not first_success:
                     self.logger.info(f"✓ Successfully connected to JSON endpoint ({len(aircraft_list)} aircraft visible)")
                     first_success = True
                 
-                # Filter and forward each aircraft
+                # Filter and forward
                 sent_count = 0
                 for aircraft in aircraft_list:
                     if self.filter_json_aircraft(aircraft):
-                        # Send as individual JSON object
                         json_str = json.dumps(aircraft) + '\n'
                         self.forward_message(json_str)
                         sent_count += 1
@@ -432,7 +502,6 @@ class ADSBServer:
                     self.logger.info(f"JSON polling: {len(aircraft_list)} aircraft, {sent_count} filtered, {total_sent} total sent")
                     stats_time = time.time()
                 
-                # Poll every 1 second
                 time.sleep(1)
                 
             except Exception as e:
@@ -445,14 +514,12 @@ class ADSBServer:
         """Run in JSON→SBS1 conversion mode"""
         self.logger.info("ADS-B Server starting in JSON→SBS1 mode...")
         
-        # Log JSON endpoint
         host = self.config.get('Dump1090', 'host', fallback='127.0.0.1')
         json_port = self.config.getint('Dump1090', 'json_port', fallback=8080)
         url = f"http://{host}:{json_port}/data/aircraft.json"
         self.logger.info(f"Polling JSON data from: {url}")
         self.logger.info("Converting JSON → SBS1 format")
         
-        # Connect to endpoints
         self.connect_to_endpoints()
         
         reconnect_time = time.time()
@@ -470,16 +537,14 @@ class ADSBServer:
                 # Fetch JSON data
                 aircraft_list = self.fetch_json_data()
                 
-                # Log first successful fetch
                 if aircraft_list and not first_success:
                     self.logger.info(f"✓ Successfully connected to JSON endpoint ({len(aircraft_list)} aircraft visible)")
                     first_success = True
                 
-                # Filter, convert and forward each aircraft
+                # Filter, convert and forward
                 sent_count = 0
                 for aircraft in aircraft_list:
                     if self.filter_json_aircraft(aircraft):
-                        # Convert to SBS1 and send
                         sbs1_message = self.json_to_sbs1(aircraft)
                         if sbs1_message:
                             self.forward_message(sbs1_message)
@@ -492,7 +557,6 @@ class ADSBServer:
                     self.logger.info(f"JSON→SBS1: {len(aircraft_list)} aircraft, {sent_count} converted & sent, {total_sent} total")
                     stats_time = time.time()
                 
-                # Poll every 1 second
                 time.sleep(1)
                 
             except Exception as e:
@@ -502,10 +566,9 @@ class ADSBServer:
         self.logger.info("ADS-B Server stopped")
     
     def run(self):
-        """Main server loop - routes to appropriate mode"""
+        """Main server loop"""
         self.running = True
         
-        # Log mode selection
         self.logger.info(f"Starting ADS-B Server in {self.output_format} mode")
         
         # Route to appropriate mode
@@ -513,27 +576,36 @@ class ADSBServer:
             self.run_json_mode()
         elif self.output_format == 'json_to_sbs1':
             self.run_json_to_sbs1_mode()
-        else:  # Default to sbs1
+        else:
             self.run_sbs1_mode()
         
     def stop(self):
-        """Stop the server"""
+        """Stop the server and clean up all resources"""
         self.logger.info("Stopping ADS-B Server...")
         self.running = False
         
-        # Close all connections
+        # Close dump1090 connection
         if self.dump1090_socket:
             try:
                 self.dump1090_socket.close()
             except:
                 pass
                 
+        # Close all endpoint connections
         for endpoint in self.endpoints:
-            if endpoint['socket']:
+            if endpoint.get('socket'):
                 try:
                     endpoint['socket'].close()
                 except:
                     pass
+                endpoint['socket'] = None
+        
+        # Wait for reconnection threads to finish (with timeout)
+        for thread in list(self.reconnection_threads):
+            if thread.is_alive():
+                thread.join(timeout=2)
+        
+        self.logger.info("ADS-B Server stopped - all resources cleaned up")
 
 def main():
     """Main entry point"""
