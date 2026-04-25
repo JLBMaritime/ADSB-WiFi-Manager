@@ -18,7 +18,7 @@ A complete ADS-B receiver and forwarder system with Wi-Fi hotspot management, we
 - Logging with 72-hour auto-purge
 
 ### **Wi-Fi Manager**
-- Web interface accessible at `http://ADS-B.local`
+- Web interface accessible at `http://ADS-B.local:5000`
 - Hotspot on `wlan1` (SSID: `JLBMaritime-ADSB`, Password: `Admin123`)
 - Internet connection via `wlan0`
 - Scan, connect, and forget Wi-Fi networks
@@ -65,7 +65,7 @@ sudo reboot
 
 That's it! After reboot, the system will be running with:
 - Hotspot active on `wlan1`
-- Web interface at `http://ADS-B.local`
+- Web interface at `http://ADS-B.local:5000`
 - ADS-B server forwarding data
 - Hardware watchdog protecting against freezes
 
@@ -79,7 +79,7 @@ Connect any device (phone/laptop) to:
 - **Password:** `Admin123`
 
 ### **2. Open the Web Interface**
-- URL: `http://ADS-B.local` (or `http://192.168.4.1`)
+- URL: `http://ADS-B.local:5000` (or `http://192.168.4.1:5000`)
 - **Username:** `JLBMaritime`
 - **Password:** `Admin`
 
@@ -100,7 +100,7 @@ Connect any device (phone/laptop) to:
 ## 🛠️ Management
 
 ### Web Interface
-http://ADS-B.local — full GUI for everything
+http://ADS-B.local:5000 — full GUI for everything
 
 ### CLI Tool (SSH)
 ```bash
