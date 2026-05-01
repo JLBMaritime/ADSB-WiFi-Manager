@@ -229,24 +229,21 @@ else
     ok "dump1090-fa already installed"
 fi
 
-# (3e) lighttpd squat-on-port-80 fix.  dump1090-fa's apt dependency
-# pulls in lighttpd (for the SkyAware web UI), which auto-binds
-# 0.0.0.0:80 -- exactly the port our waitress web manager wants.
-# We don't use lighttpd for anything: web_interface/app.py reads
-# dump1090's data via TCP (30003) and via the on-disk JSON file
-# directly, never through lighttpd.  Disable it.  Operators who want
-# the SkyAware UI back can `sudo systemctl enable --now lighttpd`,
-# at the cost of waitress falling back to :5000.
-if systemctl list-unit-files lighttpd.service >/dev/null 2>&1; then
-    if systemctl is-enabled lighttpd >/dev/null 2>&1 \
-       || systemctl is-active  lighttpd >/dev/null 2>&1; then
-        systemctl disable --now lighttpd 2>/dev/null || true
-        ok "lighttpd disabled (frees :80 for the web manager)."
-        ok "  Re-enable manually with 'sudo systemctl enable --now lighttpd'"
-        ok "  if you want the SkyAware UI on :8080 (web manager will move to :5000)."
-    else
-        ok "lighttpd already disabled."
-    fi
+# (3e) lighttpd is REQUIRED, not optional.  It serves
+# /data/aircraft.json on port 8080 and that endpoint is read by:
+#   - adsb_server.py when output_format = json or json_to_sbs1
+#     (configurable in config/adsb_server_config.conf -- the default
+#     'sbs1' mode does NOT need it, but operator-configurable so we
+#     must support it)
+#   - SkyAware live map UI at :8080/skyaware/ (nice-to-have)
+# So we leave lighttpd alone.  It will bind :80 AND :8080.  Our
+# waitress web manager will see :80 already taken and gracefully
+# fall back to :5000 -- that fallback path is already coded in
+# web_interface/app.py.  Operators reach the web UI via
+# http://<host>:5000/.  This was a deliberate architecture choice
+# in v2 over fighting lighttpd for :80.
+if systemctl is-active lighttpd >/dev/null 2>&1; then
+    ok "lighttpd is active (serves :8080/data/aircraft.json -- required by JSON mode)."
 fi
 
 # ---------------------------------------------------------------------------
@@ -377,10 +374,12 @@ ok "Venv ready at $INSTALL_DIR/.venv"
 chown -R "$ADSB_USER":"$ADSB_USER" "$INSTALL_DIR"
 chmod 0750 "$INSTALL_DIR"
 
-# Web service binds port 80 without root via setcap on the venv python.
-setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/.venv/bin/python3" \
-    && ok "setcap cap_net_bind_service on venv python3 (so we can drop User=root)" \
-    || warn "setcap failed -- web UI will fall back to port 5000"
+# Note: we deliberately do NOT setcap CAP_NET_BIND_SERVICE on the venv
+# python any more.  lighttpd owns port 80 (it serves
+# :8080/data/aircraft.json which adsb_server.py needs in JSON mode),
+# so the web manager binds :5000 instead.  Removing setcap also means
+# the web manager process has no elevated capabilities at all -- a
+# small but real hardening win.
 
 # ---------------------------------------------------------------------------
 # [7/14] NetworkManager drop-ins (powersave-off + DNS sanity)
@@ -624,8 +623,12 @@ CPUQuota=60%
 LimitNOFILE=512
 TasksMax=64
 
+# Web manager listens on 5000 because lighttpd owns 80 (lighttpd is
+# required -- see [3e] above).  app.py also has a 80->5000 fallback,
+# so even if a future change tries to bind 80 it will gracefully
+# downgrade rather than crash-loop.
 Environment=PYTHONUNBUFFERED=1
-Environment=ADSB_HTTP_PORT=80
+Environment=ADSB_HTTP_PORT=5000
 
 StandardOutput=journal
 StandardError=journal
@@ -633,6 +636,11 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# Drop the AmbientCapabilities/CapabilityBoundingSet for CAP_NET_BIND_SERVICE
+# from web-manager.service since we no longer try to bind :80.
+sed -i '/^AmbientCapabilities=CAP_NET_BIND_SERVICE$/d' /etc/systemd/system/web-manager.service
+sed -i '/^CapabilityBoundingSet=CAP_NET_BIND_SERVICE$/d' /etc/systemd/system/web-manager.service
 
 systemctl daemon-reload
 systemctl enable adsb-wifi-powersave-off.service
@@ -747,13 +755,13 @@ for svc in NetworkManager adsb-hotspot-watchdog adsb-server web-manager; do
     fi
 done
 
-# Live healthz
-if curl -fsS --max-time 3 "http://127.0.0.1/healthz" >/dev/null 2>&1; then
-    ok "GET /healthz returned 200"
-elif curl -fsS --max-time 3 "http://127.0.0.1:5000/healthz" >/dev/null 2>&1; then
-    warn "Web UI fell back to :5000 (port 80 not bound -- check setcap)"
+# Live healthz -- web manager runs on :5000 by default (lighttpd has :80).
+if curl -fsS --max-time 3 "http://127.0.0.1:5000/healthz" >/dev/null 2>&1; then
+    ok "GET :5000/healthz returned 200"
+elif curl -fsS --max-time 3 "http://127.0.0.1/healthz" >/dev/null 2>&1; then
+    warn "Web UI ended up on :80 (lighttpd missing or stopped?)"
 else
-    warn "Could not reach /healthz on :80 or :5000 yet -- service may still be warming up"
+    warn "Could not reach /healthz on :5000 or :80 yet -- service may still be warming up"
 fi
 
 # ---------------------------------------------------------------------------
@@ -768,9 +776,16 @@ else
 fi
 echo "=========================================================================="
 cat <<EOF
-  Web UI (over hotspot):   http://192.168.4.1/
-  Web UI (over LAN):       http://ADS-B.local/   or   http://<pi-ip>/
+  Web UI (over hotspot):   http://192.168.4.1:5000/
+  Web UI (over LAN):       http://ADS-B.local:5000/   or   http://<pi-ip>:5000/
   Login:                   JLBMaritime / Admin   (forced change on first login)
+
+  Note on port 5000 (not 80):
+    Port 80 is served by lighttpd, which dump1090-fa pulls in as a
+    dependency and uses for SkyAware UI + /data/aircraft.json.  The
+    forwarder (adsb_server.py) uses that JSON endpoint when its
+    output_format is 'json' or 'json_to_sbs1' -- so lighttpd is
+    REQUIRED, not optional, and our web manager runs on :5000.
 
   Hotspot SSID:            JLBMaritime-ADSB    (5 GHz, channel 36, WPA2-CCMP)
   Hotspot PSK:             $(cat "$PSK_FILE")
@@ -779,15 +794,14 @@ cat <<EOF
                            rotate:               sudo adsb-cli rotate-pw
 
   Receiver port map:
-    :80     web manager (waitress) -- you log in here
+    :5000   web manager (waitress) -- you log in here
+    :80     lighttpd / SkyAware UI (http://<host>/)
+    :8080   lighttpd / SkyAware data: /data/aircraft.json + /skyaware/
+            (read by adsb_server.py in 'json' / 'json_to_sbs1' modes)
     :30002  dump1090-fa raw OUT     } AP clients on JLBMaritime-ADSB
     :30003  dump1090-fa SBS1 OUT    } can connect to any of these
     :30005  dump1090-fa Beast OUT   } directly
     :30004/:30104   dump1090-fa raw IN (network feeders)
-    :8080   SkyAware web UI -- DISABLED by default; lighttpd is off so
-            port 80 is free for the web manager.  To re-enable:
-              sudo systemctl enable --now lighttpd
-            (the web manager will then fall back to :5000)
 
   Diagnose anytime:        sudo adsb-cli doctor
   Live forwarder logs:     sudo journalctl -u adsb-server -f

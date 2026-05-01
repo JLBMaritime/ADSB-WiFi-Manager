@@ -63,12 +63,11 @@ if id -u adsb >/dev/null 2>&1; then
     userdel adsb 2>/dev/null && ok "user 'adsb' removed" || warn "could not remove user 'adsb'"
 fi
 
-# NB: lighttpd was disabled (not removed) by install.sh.  We do NOT
-# re-enable it here -- if the operator wants the SkyAware web UI back,
-# they can `sudo systemctl enable --now lighttpd` themselves.  This
-# keeps uninstall non-destructive (no surprise port-80 squatter the
-# next time they run a different web app on this Pi).
+# NB: install.sh leaves lighttpd alone (it's REQUIRED for the
+# forwarder's JSON output mode -- :8080/data/aircraft.json).  We
+# do not touch it here either.
 
-say "Done.  Kept: dump1090-fa (still enabled), lighttpd (still disabled),"
+say "Done.  Kept: dump1090-fa (still enabled), lighttpd (still enabled,"
+say "             still serving :8080/data/aircraft.json),"
 say "             NetworkManager, dnsmasq-base, watchdog, journald drop-in."
 say "If you want a fully clean Pi: 'sudo apt-get purge dump1090-fa lighttpd watchdog avahi-daemon dnsmasq-base'"

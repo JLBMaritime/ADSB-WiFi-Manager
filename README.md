@@ -7,7 +7,12 @@ number of TCP endpoints. Ships with:
 * a self-healing 5 GHz Wi-Fi access point on `wlan1` (USB dongle) so the
   operator can always reach the device — even when `wlan0` has lost its
   upstream
-* a Flask + waitress web UI on port 80 (mDNS at `http://ADS-B.local/`)
+* a Flask + waitress web UI on port **5000** (mDNS at
+  `http://ADS-B.local:5000/`).  Port 80 is owned by `lighttpd`, which
+  ships with `dump1090-fa` and serves `/data/aircraft.json` on `:8080`
+  — that JSON endpoint is the data path used by `adsb_server.py` in
+  its `json` / `json_to_sbs1` output modes, so we must not disable
+  lighttpd.
 * a scriptable CLI (`adsb-cli`) with a one-shot `doctor` diagnostic
 * hardware + software watchdogs that auto-recover from kernel hangs,
   USB-3 dongle dropouts, and Wi-Fi power-save freezes
@@ -29,9 +34,10 @@ ports `dump1090-fa` listens on (see [Receiver port map](#receiver-port-map)).
 | 30004 | TCP listen | `0.0.0.0` | dump1090 Beast **input** | **NO** |
 | 30005 | TCP listen | `0.0.0.0` | dump1090 Beast **output** | yes |
 | 30104 | TCP listen | `0.0.0.0` | Beast input alt | **NO** |
-| 8080 | TCP listen | `0.0.0.0` | SkyAware web (lighttpd) — **disabled by default** so :80 is free for the web manager; re-enable with `sudo systemctl enable --now lighttpd` | optional |
+| **8080** | TCP listen | `0.0.0.0` | lighttpd / SkyAware: `/data/aircraft.json` + `/skyaware/` UI — **read by `adsb_server.py` when `output_format = json` / `json_to_sbs1`** | yes |
+| 80   | TCP listen | `0.0.0.0` | lighttpd default site (SkyAware aliases) | yes |
 | 30047 | TCP listen | `127.0.0.1` | piaware status JSON (loopback only) | n/a |
-| **80**  | TCP listen | `0.0.0.0` | this project's web UI (waitress) | yes |
+| **5000** | TCP listen | `0.0.0.0` | this project's web UI (waitress) | yes |
 | 53/67 (UDP) | listen | `wlan1` | per-AP DNS+DHCP (NM-shared dnsmasq) | yes |
 | 5353 (UDP) | listen | all | mDNS (`ADS-B.local`) | yes |
 
@@ -39,6 +45,14 @@ Inputs are firewalled off the AP so a malicious phone on
 `JLBMaritime-ADSB` can't inject fake aircraft into your feed; outputs
 are open so any Mode-S app on the AP (Virtual Radar Server, ADS-B
 Helper, etc.) can subscribe directly to dump1090.
+
+> **Why is the web UI on `:5000`, not `:80`?**  Because `dump1090-fa`
+> hard-depends on `lighttpd`, lighttpd auto-binds `:80` AND `:8080`
+> at boot, and lighttpd serves the `/data/aircraft.json` endpoint
+> that `adsb_server.py` reads in its JSON output modes.  Trying to
+> disable lighttpd to free `:80` would silently break that data
+> path — so we leave lighttpd alone and `app.py` falls back to
+> `:5000` (a code path that's been in `app.py` since v1).
 
 ---
 
@@ -72,7 +86,7 @@ saved to `/var/log/adsb-install.log` so support requests are easy.
 When it finishes you will see a banner like:
 
 ```
-Web UI (over hotspot):   http://192.168.4.1/
+Web UI (over hotspot):   http://192.168.4.1:5000/
 Hotspot SSID:            JLBMaritime-ADSB    (5 GHz, channel 36, WPA2-CCMP)
 Hotspot PSK:             g4Hk2eVqp7n9rW3X
 Login:                   JLBMaritime / Admin
@@ -104,7 +118,11 @@ Login:                   JLBMaritime / Admin
 1. Connect to Wi-Fi network **`JLBMaritime-ADSB`** (5 GHz).
 2. Password: run `sudo adsb-cli show-hotspot` on the Pi over SSH, or
    `cat /opt/adsb-wifi-manager/HOTSPOT_PASSWORD.txt`.
-3. Browse to **<http://192.168.4.1/>** or **<http://ADS-B.local/>**.
+3. Browse to **<http://192.168.4.1:5000/>** or **<http://ADS-B.local:5000/>**.
+
+Bare `http://192.168.4.1/` (port 80) and `http://192.168.4.1:8080/`
+will load the SkyAware live-map UI, served by lighttpd — that's a
+nice-to-have second view of the same data your AP clients are seeing.
 
 > **Upgrading from a previous install?**  The hotspot password has been
 > randomised for security and the security mode tightened to WPA2-only
@@ -116,7 +134,8 @@ Login:                   JLBMaritime / Admin
 
 After `adsb-cli` (interactive menu) → "WiFi Manager" you can connect
 the Pi to any 2.4 / 5 GHz network.  The web UI is then reachable on
-the Pi's wlan0 IP, at port 80 / `http://ADS-B.local/`.
+the Pi's wlan0 IP, at `http://<pi-ip>:5000/` or
+`http://ADS-B.local:5000/`.
 
 ### From anywhere (Tailscale)
 
@@ -126,8 +145,8 @@ sudo tailscale up --ssh                # one-time, prints a URL
 ```
 
 The Pi is now part of your Tailnet.  Other devices in the tailnet can
-hit `http://ads-b/` (Magic DNS) to reach the web UI; `tailscale ssh
-ads-b` gives you a shell.
+hit `http://ads-b:5000/` (Magic DNS) to reach the web UI; `tailscale
+ssh ads-b` gives you a shell.
 
 ---
 
@@ -141,9 +160,9 @@ sudo adsb-cli doctor
 
 Runs nine pass/fail checks: NM `;`-comment regression, AP activation,
 SSID + 5 GHz band, USB-3 dongle stability, listening sockets (30003 /
-30005 / 8080 / 80), `/healthz` round-trip, captive-portal DNS pin,
-USB-disconnect storm scan, all four units active.  Returns a non-zero
-exit code on failure so it can be wired into monitoring.
+30005 / 8080 / 5000), `/healthz` round-trip on `:5000`, captive-portal
+DNS pin, USB-disconnect storm scan, all four units active.  Returns a
+non-zero exit code on failure so it can be wired into monitoring.
 
 ### Reveal / rotate the hotspot password
 
@@ -164,7 +183,7 @@ sudo journalctl -u NetworkManager -f          # network stack
 ### Healthcheck (no auth)
 
 ```bash
-curl -fsS http://192.168.4.1/healthz | jq
+curl -fsS http://192.168.4.1:5000/healthz | jq
 ```
 
 Returns 200 only when (a) `dump1090-fa` is bound to 30003 AND
@@ -251,16 +270,31 @@ only serving a couple of phones over 5 GHz.
 The installer detects this combination and prints a loud red banner
 at install time.
 
-### Web UI not on port 80, only 5000
+### Web UI on `:5000`, not `:80` — is that broken?
 
-This happens when `setcap cap_net_bind_service=+ep` failed against
-the venv python (e.g. on filesystems that don't support file
-capabilities).  The fallback works — browse to
-`http://192.168.4.1:5000/` — but to fix it:
+**No, that is the documented and correct behaviour.**  Port 80 is
+owned by `lighttpd`, which `dump1090-fa` declares as a hard apt
+dependency.  Lighttpd serves:
+
+* `http://<host>/` — its default site (mostly empty)
+* `http://<host>:8080/` — the SkyAware live-map UI
+* `http://<host>:8080/data/aircraft.json` — the JSON endpoint
+  `adsb_server.py` reads when `output_format` is set to `json` or
+  `json_to_sbs1` in `config/adsb_server_config.conf`
+
+So lighttpd is REQUIRED, not optional.  We deliberately let it keep
+`:80` and run our waitress web manager on `:5000` instead — that's
+why the install banner says `http://192.168.4.1:5000/`.  This was a
+deliberate v2 architecture decision after the v1 attempt to disable
+lighttpd silently broke JSON-mode output.
+
+If you want to verify, check the listeners:
 
 ```bash
-sudo setcap cap_net_bind_service=+ep /opt/adsb-wifi-manager/.venv/bin/python3
-sudo systemctl restart web-manager
+ss -ltn | awk '$4 ~ /:(80|5000|8080)$/'
+# LISTEN 0 1024 *:80    -> lighttpd
+# LISTEN 0 1024 *:8080  -> lighttpd  (SkyAware + /data/aircraft.json)
+# LISTEN 0 1024 *:5000  -> waitress  (this project's web manager)
 ```
 
 ### `NetworkManager` won't start after editing `/etc/NetworkManager/conf.d/*.conf`
@@ -276,17 +310,28 @@ sudo systemctl restart NetworkManager
 The installer pre-flights this and refuses to proceed if any conf.d
 file has `;` comments.
 
-### Aircraft count always reads 0
+### Aircraft count always reads 0 / forwarder logs "Cannot reach JSON endpoint"
 
-You have an old config with `Dump1090.json_port = 30047`.  v1 wrote
-the wrong port (that's piaware's status, not dump1090-fa's data).
-The web UI auto-migrates to 8080 on next start, or fix manually:
+Two separate causes:
 
-```bash
-sudo sed -i 's/^json_port = 30047/json_port = 8080/' \
-    /opt/adsb-wifi-manager/config/adsb_server_config.conf
-sudo systemctl restart adsb-server
-```
+1. **Old config with `Dump1090.json_port = 30047`** — v1 wrote the
+   wrong port (that's piaware's status, not dump1090-fa's data).
+   The web UI auto-migrates to 8080 on next start, or fix manually:
+
+   ```bash
+   sudo sed -i 's/^json_port = 30047/json_port = 8080/' \
+       /opt/adsb-wifi-manager/config/adsb_server_config.conf
+   sudo systemctl restart adsb-server
+   ```
+
+2. **lighttpd disabled** — somebody ran `sudo systemctl disable
+   --now lighttpd`, which kills `:8080` and breaks JSON mode.
+   Restore:
+
+   ```bash
+   sudo systemctl enable --now lighttpd
+   curl -fsS http://127.0.0.1:8080/data/aircraft.json | jq '.aircraft | length'
+   ```
 
 ### `dump1090-fa` keeps crashing with "rtlsdr: error querying device #0: Permission denied"
 
@@ -338,24 +383,6 @@ sudo udevadm trigger --action=add
 # or just: sudo reboot
 ```
 
-### Web UI fell back to port 5000 because `lighttpd` was re-enabled
-
-The installer disables `lighttpd` so port 80 is free for the waitress
-web manager.  If you re-enabled `lighttpd` (e.g. for the SkyAware UI
-on `:8080`), it also re-binds `:80` and the web manager loses the
-race, falling back to `:5000`.  Pick one:
-
-```bash
-# A) keep waitress on :80 (default), drop SkyAware:
-sudo systemctl disable --now lighttpd
-
-# B) keep SkyAware on :8080, accept waitress on :5000:
-#    (no action needed; visit http://192.168.4.1:5000/)
-```
-
-`web_interface/app.py` does NOT need lighttpd for any of its
-features — option A is the documented default.
-
 ### Tailscale broke my DNS
 
 When Tailscale's installer runs without our pre-flight, it drops
@@ -391,10 +418,10 @@ Removes:
   `/root/adsb-wifi-manager-uninstall-backup-*.tar.gz`)
 * the `adsb` system user
 
-Leaves alone: `dump1090-fa`, `lighttpd` (uninstall does NOT re-enable
-it — it stays disabled, since dump1090-fa kept it as a dep but the
-SkyAware UI is optional), `NetworkManager`, `dnsmasq-base`,
-`watchdog`, the journald drop-in, and Tailscale.
+Leaves alone: `dump1090-fa`, `lighttpd` (still serving `:80` +
+`:8080/data/aircraft.json` for any other consumers),
+`NetworkManager`, `dnsmasq-base`, `watchdog`, the journald drop-in,
+and Tailscale.
 
 ---
 
@@ -409,7 +436,7 @@ adsb-wifi-manager/
 │   ├── adsb_server.py                ← SBS1 → endpoints forwarder
 │   └── _hotspot_watchdog.py          ← AP self-healer (its own systemd unit)
 ├── web_interface/
-│   └── app.py                        ← Flask + waitress UI on port 80
+│   └── app.py                        ← Flask + waitress UI on port 5000
 ├── cli/
 │   ├── adsb_cli.py                   ← `adsb-cli` entry (interactive menu)
 │   └── _subcommands.py               ← `adsb-cli doctor / show-hotspot / …`
