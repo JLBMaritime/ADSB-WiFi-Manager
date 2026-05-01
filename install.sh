@@ -170,14 +170,38 @@ RISKY_DRIVERS=(mt76x2u mt76x0u mt76xxu rt2800usb)
 risky=""
 if [[ -e /sys/class/net/wlan1/device ]]; then
     drv=$(basename "$(readlink -f /sys/class/net/wlan1/device/driver 2>/dev/null)" 2>/dev/null || true)
-    speed=$(cat /sys/class/net/wlan1/device/../speed 2>/dev/null || echo "")
-    bus=$(cat /sys/class/net/wlan1/device/../version 2>/dev/null || echo "")
+
+    # ----------------------------------------------------------------
+    # Find the *USB device* node for wlan1.
+    #
+    # Previous logic tried two things and got both wrong:
+    #   (a) `cat /sys/class/net/wlan1/device/../speed` -- this resolves
+    #       to the USB *interface* node (e.g. .../1-1.4:1.0/) which has
+    #       NO 'speed' file.  Always returns empty.
+    #   (b) `lsusb -t | grep -q '5000M'` -- this matches if ANY device
+    #       on the system enumerates at 5000M, including the Pi 4B's
+    #       OWN empty USB-3 root hub.  False positive guaranteed.
+    #
+    # Correct method: walk up from the netdev's `device` link until we
+    # find an ancestor that has a `speed` file.  That ancestor IS the
+    # USB device node.  Its `speed` field is the real link speed:
+    #   480  = USB-2 high-speed   (good)
+    #   5000 = USB-3 SuperSpeed   (the bug zone for mt76x2u on Pi 4B)
+    # ----------------------------------------------------------------
+    usb_node=$(readlink -f /sys/class/net/wlan1/device 2>/dev/null || true)
+    while [[ -n "$usb_node" && "$usb_node" != "/" && ! -f "$usb_node/speed" ]]; do
+        usb_node=$(dirname "$usb_node")
+    done
+    speed=""
+    [[ -n "$usb_node" && -f "$usb_node/speed" ]] && speed=$(cat "$usb_node/speed" 2>/dev/null || echo "")
+
     for r in "${RISKY_DRIVERS[@]}"; do
         if [[ "$drv" == "$r" ]]; then risky="$r"; break; fi
     done
     if [[ -n "$risky" ]]; then
-        # Detect USB-3 SuperSpeed enumeration (5000 Mbps).
-        if [[ "$speed" == "5000" ]] || lsusb -t 2>/dev/null | grep -q "5000M"; then
+        # Detect USB-3 SuperSpeed enumeration (5000 Mbps) on the dongle
+        # specifically -- not on any other USB-3 hub on the system.
+        if [[ "$speed" == "5000" ]]; then
             banner_red "WARNING: ${risky} dongle on a USB-3 (SuperSpeed) port"
             warn "The MediaTek MT76xx / Ralink RT2870 driver + Pi 4B xhci_hcd is a"
             warn "known unstable combination on USB-3.  Symptoms: AP appears, vanishes,"
@@ -191,7 +215,7 @@ if [[ -e /sys/class/net/wlan1/device ]]; then
             warn "to flag this until the dongle is on USB-2."
             sleep 5
         else
-            ok "wlan1 driver=$drv on USB-2 (high-speed) -- known good"
+            ok "wlan1 driver=$drv on USB-2 (link speed=${speed:-unknown} Mbps) -- known good"
         fi
     else
         ok "wlan1 driver=$drv -- not on the risky-driver list"
@@ -316,7 +340,21 @@ say "[8/14] Creating NetworkManager profile 'adsb-hotspot' on wlan1 (5 GHz, ch 3
 # NetworkManager profile (read it back via `adsb-cli show-hotspot`).
 PSK_FILE="$INSTALL_DIR/HOTSPOT_PASSWORD.txt"
 if [[ ! -s "$PSK_FILE" ]]; then
-    HOTSPOT_PSK="$(tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | head -c 16)"
+    # NB: previous version was `tr -dc '...' </dev/urandom | head -c 16`,
+    # which trips `set -o pipefail`: head closes the pipe after 16 bytes,
+    # tr writes one more chunk and is killed by SIGPIPE (exit 141), the
+    # pipeline as a whole returns 141, and the ERR trap aborts the
+    # installer at this line.  Use python3 + `secrets` instead -- no
+    # pipe, no SIGPIPE, and CSPRNG-strength randomness.
+    HOTSPOT_PSK="$(python3 -c '
+import secrets, string
+alphabet = string.ascii_letters + string.digits
+print("".join(secrets.choice(alphabet) for _ in range(16)))
+')"
+    if [[ -z "$HOTSPOT_PSK" || ${#HOTSPOT_PSK} -ne 16 ]]; then
+        fail "PSK generation failed (got ${#HOTSPOT_PSK} chars)"
+        exit 5
+    fi
     umask 077
     printf '%s\n' "$HOTSPOT_PSK" > "$PSK_FILE"
     chown "$ADSB_USER":"$ADSB_USER" "$PSK_FILE"
@@ -338,23 +376,41 @@ nmcli connection delete adsb-hotspot 2>/dev/null || true
 nmcli connection add type wifi ifname wlan1 con-name adsb-hotspot \
     autoconnect yes \
     ssid "$SSID"
+# REQUIRED properties: failure here MUST abort -- without them the
+# AP would either fail to start or accept clients in an insecure mode.
 nmcli connection modify adsb-hotspot \
     802-11-wireless.mode ap \
     802-11-wireless.band a \
     802-11-wireless.channel 36 \
-    802-11-wireless.powersave 2 \
     802-11-wireless-security.key-mgmt wpa-psk \
     802-11-wireless-security.proto rsn \
     802-11-wireless-security.pairwise ccmp \
     802-11-wireless-security.group ccmp \
-    802-11-wireless-security.pmf 1 \
     802-11-wireless-security.psk "$HOTSPOT_PSK" \
     ipv4.method shared \
     ipv4.addresses 192.168.4.1/24 \
-    ipv4.shared-dhcp-lease-time 3600 \
     ipv6.method disabled \
-    connection.autoconnect-priority 100 \
-    connection.zone trusted
+    connection.autoconnect-priority 100
+
+# OPTIONAL properties: best-effort, log on failure.
+# - 802-11-wireless.powersave    : silently ignored on older NM
+# - 802-11-wireless-security.pmf : NM 1.42 accepts the string forms
+#                                  (disable|optional|required) reliably;
+#                                  the integer alias `1` was rejected
+#                                  on at least one Bookworm build.
+# - ipv4.shared-dhcp-lease-time  : optional, NM picks a sane default
+# - connection.zone              : firewalld zone name -- RPi OS Lite
+#                                  does NOT install firewalld, so any
+#                                  value other than '' is rejected.
+#                                  We deliberately don't set this; per-
+#                                  AP isolation is already provided by
+#                                  ipv4.method=shared.
+nmcli connection modify adsb-hotspot 802-11-wireless.powersave 2 2>/dev/null \
+    || warn "could not set 802-11-wireless.powersave=2 (NM too old?)"
+nmcli connection modify adsb-hotspot 802-11-wireless-security.pmf disable 2>/dev/null \
+    || warn "could not set 802-11-wireless-security.pmf=disable (NM too old?)"
+nmcli connection modify adsb-hotspot ipv4.shared-dhcp-lease-time 3600 2>/dev/null \
+    || true
 
 # Bring it up and verify activation (poll up to 20 s).
 nmcli connection up adsb-hotspot >/dev/null || true

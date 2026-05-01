@@ -25,10 +25,17 @@ app = Flask(__name__)
 # --------------------------------------------------------------------------
 # Persistent SECRET_KEY
 # Was: hard-coded string in source.  Anyone with the repo could forge any
-# session cookie.  Persist a random key at /opt/adsb-wifi-manager/secret_key
-# (mode 600), regenerate only if missing.  Same pattern as AIS-WiFi-Manager.
+# session cookie.  Persist a random key at config/secret_key (mode 600),
+# regenerate only if missing.  Same pattern as AIS-WiFi-Manager.
+#
+# IMPORTANT: lives under config/ -- NOT directly under /opt/.../ -- because
+# the systemd unit declares `ProtectSystem=strict` plus
+# `ReadWritePaths=$INSTALL_DIR/config $INSTALL_DIR/logs`.  A path outside
+# that whitelist would be EROFS at runtime and we'd silently fall back to
+# an ephemeral key that invalidates every session on each restart.
 # --------------------------------------------------------------------------
-_SECRET_KEY_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'secret_key')
+_SECRET_KEY_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), 'config', 'secret_key')
 try:
     if not os.path.exists(_SECRET_KEY_PATH):
         with open(_SECRET_KEY_PATH, 'wb') as _f:
