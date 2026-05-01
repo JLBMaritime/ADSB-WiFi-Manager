@@ -29,7 +29,7 @@ ports `dump1090-fa` listens on (see [Receiver port map](#receiver-port-map)).
 | 30004 | TCP listen | `0.0.0.0` | dump1090 Beast **input** | **NO** |
 | 30005 | TCP listen | `0.0.0.0` | dump1090 Beast **output** | yes |
 | 30104 | TCP listen | `0.0.0.0` | Beast input alt | **NO** |
-| **8080** | TCP listen | `0.0.0.0` | dump1090 SkyAware web + `/data/aircraft.json` | yes |
+| 8080 | TCP listen | `0.0.0.0` | SkyAware web (lighttpd) — **disabled by default** so :80 is free for the web manager; re-enable with `sudo systemctl enable --now lighttpd` | optional |
 | 30047 | TCP listen | `127.0.0.1` | piaware status JSON (loopback only) | n/a |
 | **80**  | TCP listen | `0.0.0.0` | this project's web UI (waitress) | yes |
 | 53/67 (UDP) | listen | `wlan1` | per-AP DNS+DHCP (NM-shared dnsmasq) | yes |
@@ -78,8 +78,22 @@ Hotspot PSK:             g4Hk2eVqp7n9rW3X
 Login:                   JLBMaritime / Admin
 ```
 
-**Reboot once** (`sudo reboot`) so the hardware watchdog
-(`bcm2835_wdt`) takes effect.
+> **A first-install reboot is mandatory, not optional.**  Two kernel-level
+> changes only take effect on next boot:
+>
+> 1. The hardware watchdog (`bcm2835_wdt`) only arms after a reboot.
+> 2. The DVB-T blacklist (`/etc/modprobe.d/blacklist-rtl-sdr.conf`)
+>    keeps the kernel's `dvb_usb_rtl28xxu` driver from grabbing the
+>    RTL-SDR before `librtlsdr` can.  On a fresh install the DVB
+>    module is *already loaded and busy holding the dongle* — the
+>    installer can drop the blacklist file but cannot evict the
+>    running module.  Without a reboot, `dump1090-fa` will sit in a
+>    crash-loop with `rtlsdr: error querying device #0: Permission
+>    denied`.
+>
+> ```bash
+> sudo reboot
+> ```
 
 ---
 
@@ -274,6 +288,74 @@ sudo sed -i 's/^json_port = 30047/json_port = 8080/' \
 sudo systemctl restart adsb-server
 ```
 
+### `dump1090-fa` keeps crashing with "rtlsdr: error querying device #0: Permission denied"
+
+Two independent kernel/udev problems can cause this; the installer
+addresses both, but on a *first* install you must reboot at least once
+for them to take effect.
+
+```bash
+sudo journalctl -u dump1090-fa -n 20 --no-pager
+# rtlsdr: error querying device #0: Permission denied
+```
+
+**Cause 1 — kernel DVB-T tuner has the dongle.**  The same RTL2832U
+chip is used in DVB-T USB TV tuners, so `dvb_usb_rtl28xxu` claims it
+on plug-in.  Fix is the blacklist file the installer drops at
+`/etc/modprobe.d/blacklist-rtl-sdr.conf`.  The blacklist only takes
+effect on a fresh boot — on an upgrade install the running module is
+already busy.
+
+```bash
+cat /etc/modprobe.d/blacklist-rtl-sdr.conf
+# blacklist dvb_usb_rtl28xxu
+# blacklist rtl2832
+# blacklist rtl2830
+# blacklist rtl2838
+sudo reboot
+```
+
+**Cause 2 — USB device node owned by `root:root` instead of
+`root:plugdev`.**  The installer drops a udev rule at
+`/etc/udev/rules.d/60-rtlsdr.rules` that hands `0bda:2832` /
+`0bda:2838` dongles to the `plugdev` group with mode `0660`.
+Verify:
+
+```bash
+ls -la /dev/bus/usb/001/* | grep -v 'root root'
+# crw-rw---- 1 root plugdev 189, 2 ... /dev/bus/usb/001/003   ← must look like this
+
+groups dump1090
+# dump1090 : nogroup plugdev   ← user is in plugdev
+```
+
+If the node is `root:root` and not `root:plugdev`, the udev rule
+either isn't installed or wasn't applied to the existing device:
+
+```bash
+sudo udevadm control --reload-rules
+sudo udevadm trigger --action=add
+# or just: sudo reboot
+```
+
+### Web UI fell back to port 5000 because `lighttpd` was re-enabled
+
+The installer disables `lighttpd` so port 80 is free for the waitress
+web manager.  If you re-enabled `lighttpd` (e.g. for the SkyAware UI
+on `:8080`), it also re-binds `:80` and the web manager loses the
+race, falling back to `:5000`.  Pick one:
+
+```bash
+# A) keep waitress on :80 (default), drop SkyAware:
+sudo systemctl disable --now lighttpd
+
+# B) keep SkyAware on :8080, accept waitress on :5000:
+#    (no action needed; visit http://192.168.4.1:5000/)
+```
+
+`web_interface/app.py` does NOT need lighttpd for any of its
+features — option A is the documented default.
+
 ### Tailscale broke my DNS
 
 When Tailscale's installer runs without our pre-flight, it drops
@@ -302,12 +384,16 @@ Removes:
 * the `adsb-hotspot` NM connection
 * `/etc/NetworkManager/conf.d/00-wifi-powersave-off.conf`,
   `00-dns.conf`, `dnsmasq-shared.d/00-adsb-upstream.conf`
+* `/etc/modprobe.d/blacklist-rtl-sdr.conf` (DVB-T tuner blacklist)
+* `/etc/udev/rules.d/60-rtlsdr.rules` (rtl-sdr permissions)
 * `/etc/sudoers.d/adsb-wifi-manager` and `/usr/local/bin/adsb-cli`
 * `/opt/adsb-wifi-manager` (after a tarball backup to
   `/root/adsb-wifi-manager-uninstall-backup-*.tar.gz`)
 * the `adsb` system user
 
-Leaves alone: `dump1090-fa`, `NetworkManager`, `dnsmasq-base`,
+Leaves alone: `dump1090-fa`, `lighttpd` (uninstall does NOT re-enable
+it — it stays disabled, since dump1090-fa kept it as a dep but the
+SkyAware UI is optional), `NetworkManager`, `dnsmasq-base`,
 `watchdog`, the journald drop-in, and Tailscale.
 
 ---

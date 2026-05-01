@@ -143,9 +143,76 @@ systemctl disable --now dnsmasq hostapd 2>/dev/null || true
 ok "Packages installed; full dnsmasq + hostapd removed (NM owns the AP now)"
 
 # ---------------------------------------------------------------------------
-# [3/14] dump1090-fa (the ADS-B receiver)
+# [3/14] dump1090-fa (the ADS-B receiver) + RTL-SDR udev rule + DVB blacklist
+#
+# Three things go in this phase, in this order:
+#
+#   1.  Drop /etc/modprobe.d/blacklist-rtl-sdr.conf so the kernel's
+#       DVB-T tuner driver (`dvb_usb_rtl28xxu`) doesn't grab the
+#       RTL2832U dongle when it enumerates.  Without this, dump1090-fa
+#       on a fresh Bookworm install hits:
+#           rtlsdr: error querying device #0: Permission denied
+#       in a 30-second restart loop forever.
+#
+#   2.  Drop /etc/udev/rules.d/60-rtlsdr.rules so when the dongle
+#       enumerates the USB device node is created with
+#       group=plugdev, mode=0660 -- otherwise it lands as root:root
+#       and the unprivileged `dump1090` daemon user can't open it
+#       (also "Permission denied", different cause).
+#
+#   3.  Install dump1090-fa itself.  PiAware's installer is *supposed*
+#       to drop equivalents of (1) and (2), but it misses on at least
+#       some Bookworm + Pi 4B + 0bda:2832 clone-dongle combinations.
+#       Doing them ourselves is idempotent and harmless even when
+#       PiAware does the right thing.
+#
+# After install we attempt `modprobe -r` on the DVB modules.  This
+# usually fails (the modules are busy, holding the dongle) and the
+# fix is a reboot -- which is already mandatory at the end of the
+# installer for the hardware watchdog anyway.
 # ---------------------------------------------------------------------------
-say "[3/14] Installing FlightAware dump1090-fa receiver..."
+say "[3/14] Installing RTL-SDR udev rule + DVB blacklist + dump1090-fa receiver..."
+
+# (3a) DVB-T tuner driver blacklist
+cat >/etc/modprobe.d/blacklist-rtl-sdr.conf <<'EOF'
+# adsb-wifi-manager: keep the in-kernel DVB-T tuner driver away from
+# the RTL2832U so dump1090-fa (via librtlsdr) can claim it.
+blacklist dvb_usb_rtl28xxu
+blacklist rtl2832
+blacklist rtl2830
+blacklist rtl2838
+EOF
+ok "DVB blacklist installed -> /etc/modprobe.d/blacklist-rtl-sdr.conf"
+
+# (3b) udev rule -> hand RTL2832U/RTL2838-class dongles to the
+# 'plugdev' group with mode 0660 so the 'dump1090' daemon user
+# (which is in plugdev) can rtlsdr_open() the device.
+cat >/etc/udev/rules.d/60-rtlsdr.rules <<'EOF'
+# adsb-wifi-manager: rtl-sdr USB dongle permissions.
+# Without this the device node is root:root 0664 and dump1090-fa
+# fails with "rtlsdr: error querying device #0: Permission denied".
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2832", MODE="0660", GROUP="plugdev", SYMLINK+="rtl_sdr"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", MODE="0660", GROUP="plugdev", SYMLINK+="rtl_sdr"
+EOF
+udevadm control --reload-rules || warn "udevadm reload-rules failed"
+udevadm trigger --action=add 2>/dev/null || true
+ok "udev rule installed -> /etc/udev/rules.d/60-rtlsdr.rules"
+
+# (3c) Try to unbind the in-kernel DVB modules now (best-effort -- on
+# a fresh install they're usually busy holding the dongle and the
+# rmmod fails; the mandatory reboot at the end of the installer will
+# guarantee they don't load on next boot).
+DVB_STILL_LOADED=0
+for m in dvb_usb_rtl28xxu rtl2832_sdr rtl2832 dvb_usb_v2 dvb_core rtl2830 rtl2838; do
+    modprobe -r "$m" 2>/dev/null || true
+done
+if lsmod | grep -qE '^(rtl2832|dvb_usb_rtl28xxu|dvb_usb_v2|dvb_core)\b'; then
+    DVB_STILL_LOADED=1
+    warn "DVB modules still loaded (will not be on next boot due to blacklist)."
+    warn "dump1090-fa may keep restarting until you reboot -- this is expected."
+fi
+
+# (3d) FlightAware repo + dump1090-fa
 if ! command -v dump1090-fa >/dev/null 2>&1; then
     tmp=/tmp/piaware-repo.deb
     if wget -q -O "$tmp" \
@@ -160,6 +227,26 @@ if ! command -v dump1090-fa >/dev/null 2>&1; then
     fi
 else
     ok "dump1090-fa already installed"
+fi
+
+# (3e) lighttpd squat-on-port-80 fix.  dump1090-fa's apt dependency
+# pulls in lighttpd (for the SkyAware web UI), which auto-binds
+# 0.0.0.0:80 -- exactly the port our waitress web manager wants.
+# We don't use lighttpd for anything: web_interface/app.py reads
+# dump1090's data via TCP (30003) and via the on-disk JSON file
+# directly, never through lighttpd.  Disable it.  Operators who want
+# the SkyAware UI back can `sudo systemctl enable --now lighttpd`,
+# at the cost of waitress falling back to :5000.
+if systemctl list-unit-files lighttpd.service >/dev/null 2>&1; then
+    if systemctl is-enabled lighttpd >/dev/null 2>&1 \
+       || systemctl is-active  lighttpd >/dev/null 2>&1; then
+        systemctl disable --now lighttpd 2>/dev/null || true
+        ok "lighttpd disabled (frees :80 for the web manager)."
+        ok "  Re-enable manually with 'sudo systemctl enable --now lighttpd'"
+        ok "  if you want the SkyAware UI on :8080 (web manager will move to :5000)."
+    else
+        ok "lighttpd already disabled."
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -638,10 +725,16 @@ if [[ $WITH_TAILSCALE -eq 1 ]]; then
 fi
 
 say "[14/14] Starting services + post-flight..."
-systemctl try-restart adsb-wifi-powersave-off.service || systemctl start adsb-wifi-powersave-off.service
-systemctl try-restart adsb-hotspot-watchdog.service   || systemctl start adsb-hotspot-watchdog.service
-systemctl try-restart adsb-server.service             || systemctl start adsb-server.service
-systemctl try-restart web-manager.service             || systemctl start web-manager.service
+# NB: previous version used `try-restart X || start X`.  systemctl
+# `try-restart` is documented as a NO-OP that returns 0 when the unit
+# is stopped -- so the `||` arm never fires `start`, the service
+# never comes up, and the post-flight check below reports it as
+# inactive.  Plain `restart` does the right thing in both states
+# (start if stopped, restart if running).
+systemctl restart adsb-wifi-powersave-off.service || warn "adsb-wifi-powersave-off start failed"
+systemctl restart adsb-hotspot-watchdog.service   || warn "adsb-hotspot-watchdog start failed"
+systemctl restart adsb-server.service             || warn "adsb-server start failed"
+systemctl restart web-manager.service             || warn "web-manager start failed"
 
 sleep 3
 post_ok=1
@@ -686,19 +779,34 @@ cat <<EOF
                            rotate:               sudo adsb-cli rotate-pw
 
   Receiver port map:
-    1090 MHz radio  -> dump1090-fa
-                       :30002  raw OUT (open)         } readable by AP
-                       :30003  SBS1 OUT (open)        } clients on
-                       :30005  Beast OUT (open)       } JLBMaritime-ADSB
-                       :8080   SkyAware web (open)    }
-                       :30001/4/30104 raw IN (firewalled OFF on wlan1)
+    :80     web manager (waitress) -- you log in here
+    :30002  dump1090-fa raw OUT     } AP clients on JLBMaritime-ADSB
+    :30003  dump1090-fa SBS1 OUT    } can connect to any of these
+    :30005  dump1090-fa Beast OUT   } directly
+    :30004/:30104   dump1090-fa raw IN (network feeders)
+    :8080   SkyAware web UI -- DISABLED by default; lighttpd is off so
+            port 80 is free for the web manager.  To re-enable:
+              sudo systemctl enable --now lighttpd
+            (the web manager will then fall back to :5000)
 
   Diagnose anytime:        sudo adsb-cli doctor
   Live forwarder logs:     sudo journalctl -u adsb-server -f
   Live AP supervisor:      sudo journalctl -u adsb-hotspot-watchdog -f -o cat
 
-  REBOOT now to activate the hardware watchdog:  sudo reboot
+  *** REBOOT NOW -- THIS IS REQUIRED, NOT OPTIONAL ***   sudo reboot
+
+  The hardware watchdog only arms after a reboot, and on a FIRST
+  install the kernel's DVB-T tuner driver is still resident in
+  memory holding the RTL-SDR dongle (the blacklist we just dropped
+  only takes effect at next boot).  Without the reboot dump1090-fa
+  will keep crashing with "rtlsdr: error querying device #0:
+  Permission denied".
 EOF
+
+if [[ $DVB_STILL_LOADED -eq 1 ]]; then
+    banner_red "REBOOT REQUIRED -- DVB modules still resident in kernel"
+    warn "dump1090-fa will fail until you 'sudo reboot' -- this is normal on a first install."
+fi
 
 # IMPORTANT: see README troubleshooting "USB Wi-Fi dongle keeps dropping out
 # (mt76x2u + Pi 4B USB-3 bug)" if the AP is intermittent.

@@ -40,6 +40,15 @@ rm -f /etc/sudoers.d/adsb-wifi-manager
 rm -f /usr/local/bin/adsb-cli
 ok "sudoers + adsb-cli removed"
 
+say "Removing rtl-sdr DVB blacklist + udev rule..."
+# These are SAFE to remove on uninstall: dump1090-fa is left enabled,
+# but it does its own permission/blacklist setup via PiAware on most
+# systems; if not, a re-install of this project will recreate them.
+rm -f /etc/modprobe.d/blacklist-rtl-sdr.conf
+rm -f /etc/udev/rules.d/60-rtlsdr.rules
+udevadm control --reload-rules 2>/dev/null || true
+ok "rtl-sdr blacklist + udev rule removed"
+
 say "Backing up config + removing $INSTALL_DIR..."
 if [[ -d "$INSTALL_DIR" ]]; then
     bk="/root/adsb-wifi-manager-uninstall-backup-$(date +%Y%m%d_%H%M%S).tar.gz"
@@ -54,5 +63,12 @@ if id -u adsb >/dev/null 2>&1; then
     userdel adsb 2>/dev/null && ok "user 'adsb' removed" || warn "could not remove user 'adsb'"
 fi
 
-say "Done.  Kept: dump1090-fa, NetworkManager, dnsmasq-base, watchdog, journald drop-in."
-say "If you want a fully clean Pi: 'sudo apt-get purge dump1090-fa watchdog avahi-daemon dnsmasq-base'"
+# NB: lighttpd was disabled (not removed) by install.sh.  We do NOT
+# re-enable it here -- if the operator wants the SkyAware web UI back,
+# they can `sudo systemctl enable --now lighttpd` themselves.  This
+# keeps uninstall non-destructive (no surprise port-80 squatter the
+# next time they run a different web app on this Pi).
+
+say "Done.  Kept: dump1090-fa (still enabled), lighttpd (still disabled),"
+say "             NetworkManager, dnsmasq-base, watchdog, journald drop-in."
+say "If you want a fully clean Pi: 'sudo apt-get purge dump1090-fa lighttpd watchdog avahi-daemon dnsmasq-base'"
