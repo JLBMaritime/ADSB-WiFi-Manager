@@ -228,8 +228,17 @@ if [[ -e "$INSTALL_DIR/web_interface" ]]; then
     say "  Existing install detected -- backing up to $bk"
     cp -a "$INSTALL_DIR" "$bk"
 fi
-# Copy fresh
-rsync -a --delete --exclude='.venv' --exclude='config/*.conf' --exclude='HOTSPOT_PASSWORD.txt' \
+# Copy fresh.
+# IMPORTANT: the exclude list names *runtime* files only -- we used to
+# do `--exclude='config/*.conf'` which also stripped the project's
+# *shipped* NM drop-ins (config/wifi-powersave-off.conf,
+# config/dnsmasq-shared-adsb.conf), which then caused step [7/14] to
+# fail with "cannot stat /opt/.../config/wifi-powersave-off.conf".
+# Whitelist the operator-edited files by exact name instead.
+rsync -a --delete --exclude='.venv' \
+      --exclude='config/adsb_server_config.conf' \
+      --exclude='config/web_config.conf' \
+      --exclude='HOTSPOT_PASSWORD.txt' \
       --exclude='secret_key' --exclude='logs/*' \
       "$SOURCE_DIR"/ "$INSTALL_DIR"/
 mkdir -p "$INSTALL_DIR"/{config,logs}
@@ -237,9 +246,17 @@ mkdir -p "$INSTALL_DIR"/{config,logs}
 find "$INSTALL_DIR" \( -name '*.py' -o -name '*.sh' -o -name '*.conf' \) \
     -exec dos2unix -q {} \; 2>/dev/null || true
 
-# Venv (PEP 668-friendly)
-if [[ ! -e "$INSTALL_DIR/.venv/bin/python3" ]]; then
-    python3 -m venv "$INSTALL_DIR/.venv"
+# Venv (PEP 668-friendly).
+# `--copies` (NOT a symlink) is REQUIRED because we will run
+# `setcap cap_net_bind_service=+ep` on the venv python below.
+# setcap(8) refuses to operate on symlinks (it would otherwise be
+# applying the capability to the SYSTEM /usr/bin/python3.11, which is
+# both a security hole and not what we want).  If the venv already
+# exists as a symlink-style venv from a previous v2 install, blow it
+# away and recreate so setcap can succeed.
+if [[ -L "$INSTALL_DIR/.venv/bin/python3" || ! -e "$INSTALL_DIR/.venv/bin/python3" ]]; then
+    rm -rf "$INSTALL_DIR/.venv"
+    python3 -m venv --copies "$INSTALL_DIR/.venv"
 fi
 "$INSTALL_DIR/.venv/bin/pip" install --quiet --upgrade pip wheel
 "$INSTALL_DIR/.venv/bin/pip" install --quiet \
@@ -259,7 +276,11 @@ setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/.venv/bin/python3" \
 # ---------------------------------------------------------------------------
 say "[7/14] Installing NetworkManager drop-ins..."
 mkdir -p /etc/NetworkManager/conf.d
-install -m 0644 "$INSTALL_DIR/config/wifi-powersave-off.conf" \
+# Read the NM drop-ins from the SOURCE checkout, not the /opt/ copy.
+# They are static, source-controlled files -- no need to round-trip
+# them through $INSTALL_DIR, and not doing so means we no longer care
+# whether the rsync exclude list happens to skip them.
+install -m 0644 "$SOURCE_DIR/config/wifi-powersave-off.conf" \
     /etc/NetworkManager/conf.d/00-wifi-powersave-off.conf
 # Pre-empt the "Tailscale broke my DNS" trap: declare dns=default
 # BEFORE Tailscale's installer drops dns=systemd-resolved.
@@ -274,7 +295,7 @@ rc-manager=file
 EOF
 # dnsmasq drop-in for the per-AP private dnsmasq spawned by ipv4.method=shared
 mkdir -p /etc/NetworkManager/dnsmasq-shared.d
-install -m 0644 "$INSTALL_DIR/config/dnsmasq-shared-adsb.conf" \
+install -m 0644 "$SOURCE_DIR/config/dnsmasq-shared-adsb.conf" \
     /etc/NetworkManager/dnsmasq-shared.d/00-adsb-upstream.conf
 
 # Final ';'-comment regression check (we just installed two files)
