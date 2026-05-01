@@ -1,0 +1,26 @@
+[Unit]
+# Belt-and-braces fallback to the NM drop-in at
+# /etc/NetworkManager/conf.d/00-wifi-powersave-off.conf.  Some kernel
+# revisions on RPi OS Bookworm re-enable Wi-Fi power-save behind NM's
+# back when the interface bounces (USB hotplug, suspend/resume, etc.),
+# which on the AP-side wlan1 manifests as missing beacons -> phones
+# silently drop the AP.  This unit fires on every NM dispatcher event
+# and disables power-save again via `iw`.
+Description=Force Wi-Fi power-save OFF on wlan0 and wlan1
+After=NetworkManager.service network-online.target
+Wants=NetworkManager.service
+ConditionPathExists=/usr/sbin/iw
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+# Run BOTH commands; ignore errors (interface may not be present yet).
+ExecStart=/bin/sh -c '/usr/sbin/iw dev wlan0 set power_save off 2>/dev/null || true; /usr/sbin/iw dev wlan1 set power_save off 2>/dev/null || true'
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

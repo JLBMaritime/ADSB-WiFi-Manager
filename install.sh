@@ -1,210 +1,365 @@
-#!/bin/bash
+#!/usr/bin/env bash
 ################################################################################
-# ADS-B Wi-Fi Manager - Complete Installation Script (Fresh Pi)
-# JLBMaritime - Raspberry Pi 4B
+# ADS-B Wi-Fi Manager - Installer v2 (NetworkManager-shared AP, 5 GHz)
+# JLBMaritime - Raspberry Pi 4B + USB Wi-Fi dongle on wlan1
 #
-# This single script installs and configures EVERYTHING:
-#   - ADS-B Server (with V1 stability fixes: timeouts, leak prevention, monitoring)
-#   - Web Manager (Wi-Fi configuration UI)
-#   - Wi-Fi Hotspot (wlan1) + Internet (wlan0)
-#   - CLI tool (adsb-cli)
-#   - Hardware Watchdog (auto-reboot on freeze)
-#   - systemd auto-restart with memory limits
-#   - Health monitoring (auto-recovery)
-#   - SD card optimizations
-#   - Log rotation
+# Major changes vs. v1:
+#   * AP stack moved from `hostapd + dnsmasq + /etc/network/interfaces.d`
+#     to a single NetworkManager profile (`adsb-hotspot`) with
+#     `ipv4.method=shared` -- no more dual-stack races, no more
+#     "interface not coming up" because NM and ifupdown both think
+#     they own wlan1.  This matches AIS-WiFi-Manager exactly.
+#   * 5 GHz channel 36 (UNII-1, non-DFS), WPA2-only CCMP -- iPhones
+#     and Android 14+ refused to associate with the old WPA1+WPA2
+#     mixed/TKIP config.
+#   * Random 16-char alphanumeric PSK at install time (was hard-coded
+#     `Admin123` in git).
+#   * Captive-portal probe redirects so phones see the AP as a normal
+#     "internet OK" Wi-Fi network and don't trap Safari in a captive
+#     sheet.
+#   * Hotspot self-healer (`adsb-hotspot-watchdog.service`) recovers
+#     from mt76x2u USB blips without operator intervention.
+#   * MT7612U / MT7610U / RT2870 USB-3 detector with a loud red
+#     warning at install time.
+#   * Forwarder waits for dump1090's port 30003 to be bound before
+#     starting (race fix).
+#   * Web UI binds port 80 via `setcap cap_net_bind_service=+ep` on a
+#     venv python3 instead of `User=root`.
+#   * Python deps installed into a venv at /opt/adsb-wifi-manager/.venv
+#     (PEP 668 compliant -- no more `--break-system-packages`).
+#   * `set -euo pipefail` + ERR trap for fail-fast diagnostics.
+#   * `chmod +x` reminder built in for users who uploaded via the
+#     GitHub web UI (which strips the +x bit).
+#
+# Tested on:
+#   * Raspberry Pi OS Bookworm 64-bit Lite, kernel 6.6.x
+#   * MT7612U / RT2870 / RT5370 USB Wi-Fi dongles plugged into the
+#     BLACK (USB-2) ports of the Pi 4B -- not the BLUE (USB-3) ports;
+#     see README troubleshooting if you hit dropouts.
 #
 # Usage:
-#   sudo ./install.sh
-#   sudo reboot   # REQUIRED for hardware watchdog activation
+#   chmod +x install.sh           # see README "GitHub web upload" note
+#   sudo ./install.sh             # standard install
+#   sudo ./install.sh --with-tailscale   # bring up Tailscale too
+#
+# After it finishes:
+#   * Connect a phone/laptop to SSID 'JLBMaritime-ADSB'
+#     (password: cat /opt/adsb-wifi-manager/HOTSPOT_PASSWORD.txt)
+#   * Browse to http://192.168.4.1/  or  http://ADS-B.local/
+#   * Login: JLBMaritime / Admin (force-changed on first sign-in)
 ################################################################################
 
-set -e
+set -euo pipefail
 
-echo "=================================================="
-echo "ADS-B Wi-Fi Manager - Complete Installation"
-echo "JLBMaritime - Raspberry Pi 4B"
-echo "=================================================="
-echo ""
+# ---------------------------------------------------------------------------
+# Pretty-printing
+# ---------------------------------------------------------------------------
+RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[1;33m'; CYA='\033[0;36m'; RST='\033[0m'
+say()   { printf "${CYA}==>${RST} %s\n" "$*"; }
+ok()    { printf "${GRN}  [OK]${RST} %s\n" "$*"; }
+warn()  { printf "${YLW}  [!!]${RST} %s\n" "$*"; }
+fail()  { printf "${RED}  [XX]${RST} %s\n" "$*" >&2; }
+banner_red() {
+    printf "${RED}"
+    printf '%.0s#' {1..72}; printf '\n'
+    printf '# %-68s #\n' "$1"
+    printf '%.0s#' {1..72}; printf '\n'
+    printf "${RST}"
+}
 
-# ---------------- Pre-flight Checks ----------------
-if [ "$EUID" -ne 0 ]; then 
-    echo "ERROR: Please run as root (sudo ./install.sh)"
-    exit 1
+LOG=/var/log/adsb-install.log
+trap 'fail "install.sh failed at line $LINENO. See $LOG for the full transcript."' ERR
+exec > >(tee -a "$LOG") 2>&1
+
+# ---------------------------------------------------------------------------
+# Pre-flight checks
+# ---------------------------------------------------------------------------
+say "ADS-B Wi-Fi Manager installer v2 -- Bookworm + NM-shared AP"
+
+if [[ $EUID -ne 0 ]]; then
+    fail "Please run as root: sudo ./install.sh"; exit 1
 fi
-
-ACTUAL_USER=${SUDO_USER:-$USER}
-if [ "$ACTUAL_USER" = "root" ]; then
-    echo "ERROR: Please run with sudo, not as root user"
-    exit 1
+ACTUAL_USER="${SUDO_USER:-${USER:-pi}}"
+if [[ "$ACTUAL_USER" == "root" ]]; then
+    fail "Run with sudo from your login user, not directly as root."; exit 1
 fi
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="/opt/adsb-wifi-manager"
+ADSB_USER="adsb"
 
-INSTALL_DIR="/home/$ACTUAL_USER/ADSB-WiFi-Manager"
-SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
+WITH_TAILSCALE=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-tailscale) WITH_TAILSCALE=1 ;;
+        *) warn "Unknown arg: $arg" ;;
+    esac
+done
 
-echo "Installing for user: $ACTUAL_USER"
-echo "Installation directory: $INSTALL_DIR"
-echo "Source directory: $SOURCE_DIR"
-echo ""
+ok  "Source : $SOURCE_DIR"
+ok  "Install: $INSTALL_DIR"
+ok  "Operator user: $ACTUAL_USER (web UI service runs as $ADSB_USER)"
+[[ $WITH_TAILSCALE -eq 1 ]] && ok "Tailscale: will install"
 
-# ---------------- [1/12] Update System ----------------
-echo "[1/12] Updating system packages..."
-apt-get update
-apt-get upgrade -y
+# ---------------------------------------------------------------------------
+# [1/14] Validate NM drop-ins (the ';'-comment trap)
+# ---------------------------------------------------------------------------
+say "[1/14] Validating /etc/NetworkManager/conf.d/*.conf for the ';'-comment trap..."
+shopt -s nullglob
+bad=0
+for f in /etc/NetworkManager/conf.d/*.conf; do
+    if grep -Pq '^[[:space:]]*;' "$f"; then
+        fail "  $f contains ';'-style comments -- glib's keyfile parser on"
+        fail "  Bookworm rejects them and NetworkManager will refuse to start."
+        fail "  Fix:  sudo sed -i 's/^[[:space:]]*;/#/' $f"
+        bad=1
+    fi
+done
+shopt -u nullglob
+if [[ $bad -eq 1 ]]; then
+    fail "Aborting before we make things worse.  Fix the file(s) above and re-run."
+    exit 2
+fi
+ok "No ';' comments found"
 
-# ---------------- [2/12] Install System Packages ----------------
-echo "[2/12] Installing required packages..."
+# ---------------------------------------------------------------------------
+# [2/14] System packages (no apt upgrade -- explicit deps only)
+# ---------------------------------------------------------------------------
+say "[2/14] Installing system packages..."
+apt-get update -qq
+# NB: dnsmasq-base (binary only, NO unit) NOT dnsmasq -- the full
+# dnsmasq package's unit grabs :53/:67 on 0.0.0.0 and steals them
+# from NetworkManager's per-AP private dnsmasq.  The remove below
+# is belt-and-braces for upgrades from v1.
 apt-get install -y \
-    python3 \
-    python3-pip \
-    python3-venv \
-    hostapd \
-    dnsmasq \
+    python3 python3-venv python3-pip \
+    network-manager dnsmasq-base \
+    iw wireless-tools \
+    libcap2-bin curl wget git dos2unix \
     avahi-daemon \
-    wireless-tools \
-    wpasupplicant \
-    git \
-    curl \
-    dos2unix \
-    watchdog \
-    logrotate
+    watchdog logrotate \
+    rfkill usbutils
+apt-get remove -y dnsmasq hostapd 2>/dev/null || true
+systemctl disable --now dnsmasq hostapd 2>/dev/null || true
+ok "Packages installed; full dnsmasq + hostapd removed (NM owns the AP now)"
 
-# ---------------- [3/12] Install dump1090-fa ----------------
-echo "[3/12] Installing FlightAware dump1090-fa..."
-if ! command -v dump1090-fa &> /dev/null; then
-    wget -O /tmp/piaware-repo.deb \
-        https://www.flightaware.com/adsb/piaware/files/packages/pool/piaware/f/flightaware-apt-repository/flightaware-apt-repository_1.2_all.deb \
-        || true
-    if [ -f /tmp/piaware-repo.deb ]; then
-        dpkg -i /tmp/piaware-repo.deb || true
-        apt-get update
-        apt-get install -y dump1090-fa || echo "WARNING: dump1090-fa install failed - install manually"
+# ---------------------------------------------------------------------------
+# [3/14] dump1090-fa (the ADS-B receiver)
+# ---------------------------------------------------------------------------
+say "[3/14] Installing FlightAware dump1090-fa receiver..."
+if ! command -v dump1090-fa >/dev/null 2>&1; then
+    tmp=/tmp/piaware-repo.deb
+    if wget -q -O "$tmp" \
+        "https://www.flightaware.com/adsb/piaware/files/packages/pool/piaware/f/flightaware-apt-repository/flightaware-apt-repository_1.2_all.deb"
+    then
+        dpkg -i "$tmp" || true
+        rm -f "$tmp"
+        apt-get update -qq
+        apt-get install -y dump1090-fa || warn "dump1090-fa install failed -- install manually later"
     else
-        echo "WARNING: Could not download dump1090-fa repository"
+        warn "Could not download dump1090-fa repo; install manually if you need it"
     fi
 else
-    echo "      ✓ dump1090-fa already installed"
+    ok "dump1090-fa already installed"
 fi
 
-# ---------------- [4/12] Install Python Packages ----------------
-echo "[4/12] Installing Python packages (Flask + psutil for stability)..."
-pip3 install flask psutil --break-system-packages 2>/dev/null || pip3 install flask psutil
-echo "      ✓ Flask installed (web framework)"
-echo "      ✓ psutil installed (resource monitoring)"
-
-# ---------------- [5/12] Copy Application Files ----------------
-echo "[5/12] Installing application files..."
-if [ -d "$INSTALL_DIR" ]; then
-    BACKUP="${INSTALL_DIR}.backup.$(date +%Y%m%d_%H%M%S)"
-    echo "      Backing up existing installation to $BACKUP"
-    mv "$INSTALL_DIR" "$BACKUP"
+# ---------------------------------------------------------------------------
+# [4/14] mt76x2u / rt2800usb USB-3 stability detector
+# ---------------------------------------------------------------------------
+say "[4/14] Checking the wlan1 USB dongle for the USB-3 stability bug..."
+RISKY_DRIVERS=(mt76x2u mt76x0u mt76xxu rt2800usb)
+risky=""
+if [[ -e /sys/class/net/wlan1/device ]]; then
+    drv=$(basename "$(readlink -f /sys/class/net/wlan1/device/driver 2>/dev/null)" 2>/dev/null || true)
+    speed=$(cat /sys/class/net/wlan1/device/../speed 2>/dev/null || echo "")
+    bus=$(cat /sys/class/net/wlan1/device/../version 2>/dev/null || echo "")
+    for r in "${RISKY_DRIVERS[@]}"; do
+        if [[ "$drv" == "$r" ]]; then risky="$r"; break; fi
+    done
+    if [[ -n "$risky" ]]; then
+        # Detect USB-3 SuperSpeed enumeration (5000 Mbps).
+        if [[ "$speed" == "5000" ]] || lsusb -t 2>/dev/null | grep -q "5000M"; then
+            banner_red "WARNING: ${risky} dongle on a USB-3 (SuperSpeed) port"
+            warn "The MediaTek MT76xx / Ralink RT2870 driver + Pi 4B xhci_hcd is a"
+            warn "known unstable combination on USB-3.  Symptoms: AP appears, vanishes,"
+            warn "reappears every 10-30 s, journalctl shows 'mt76x2u: timed out waiting"
+            warn "for pending tx' and 'usb 2-1: USB disconnect' in a loop."
+            warn ""
+            warn "FIX: shut down, move the dongle from a BLUE (USB-3) port to a BLACK"
+            warn "     (USB-2) port on the Pi 4B.  No software change required."
+            warn ""
+            warn "The installer will continue, but 'adsb-cli doctor' will continue"
+            warn "to flag this until the dongle is on USB-2."
+            sleep 5
+        else
+            ok "wlan1 driver=$drv on USB-2 (high-speed) -- known good"
+        fi
+    else
+        ok "wlan1 driver=$drv -- not on the risky-driver list"
+    fi
+else
+    warn "/sys/class/net/wlan1 not present yet -- plug the dongle in or check 'iw dev'"
 fi
 
+# ---------------------------------------------------------------------------
+# [5/14] Persistent journal (so we keep watchdog logs across reboots)
+# ---------------------------------------------------------------------------
+say "[5/14] Enabling persistent journald..."
+mkdir -p /var/log/journal
+mkdir -p /etc/systemd/journald.conf.d
+cat >/etc/systemd/journald.conf.d/00-adsb-persistent.conf <<'EOF'
+[Journal]
+Storage=persistent
+SystemMaxUse=200M
+SystemMaxFileSize=50M
+MaxRetentionSec=14day
+EOF
+systemctl restart systemd-journald
+ok "Journal is persistent (200M cap)"
+
+# ---------------------------------------------------------------------------
+# [6/14] Materialise project at /opt + venv
+# ---------------------------------------------------------------------------
+say "[6/14] Copying project to $INSTALL_DIR + creating venv..."
+id -u "$ADSB_USER" >/dev/null 2>&1 || useradd --system --home "$INSTALL_DIR" --shell /usr/sbin/nologin "$ADSB_USER"
 mkdir -p "$INSTALL_DIR"
-cp -r "$SOURCE_DIR"/* "$INSTALL_DIR/"
-chown -R "$ACTUAL_USER:$ACTUAL_USER" "$INSTALL_DIR"
+# Backup any previous install
+if [[ -e "$INSTALL_DIR/web_interface" ]]; then
+    bk="$INSTALL_DIR.backup.$(date +%Y%m%d_%H%M%S)"
+    say "  Existing install detected -- backing up to $bk"
+    cp -a "$INSTALL_DIR" "$bk"
+fi
+# Copy fresh
+rsync -a --delete --exclude='.venv' --exclude='config/*.conf' --exclude='HOTSPOT_PASSWORD.txt' \
+      --exclude='secret_key' --exclude='logs/*' \
+      "$SOURCE_DIR"/ "$INSTALL_DIR"/
+mkdir -p "$INSTALL_DIR"/{config,logs}
+# CRLF -> LF (Windows-edited files are common)
+find "$INSTALL_DIR" \( -name '*.py' -o -name '*.sh' -o -name '*.conf' \) \
+    -exec dos2unix -q {} \; 2>/dev/null || true
 
-mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/logs"
-chown -R "$ACTUAL_USER:$ACTUAL_USER" "$INSTALL_DIR/config" "$INSTALL_DIR/logs"
+# Venv (PEP 668-friendly)
+if [[ ! -e "$INSTALL_DIR/.venv/bin/python3" ]]; then
+    python3 -m venv "$INSTALL_DIR/.venv"
+fi
+"$INSTALL_DIR/.venv/bin/pip" install --quiet --upgrade pip wheel
+"$INSTALL_DIR/.venv/bin/pip" install --quiet \
+    flask waitress flask-login bcrypt sdnotify psutil
+ok "Venv ready at $INSTALL_DIR/.venv"
 
-# Convert all Python files to Unix line endings (fixes Windows CRLF issues)
-find "$INSTALL_DIR" -name "*.py" -exec dos2unix {} \; 2>/dev/null || true
-find "$INSTALL_DIR" -name "*.sh" -exec dos2unix {} \; 2>/dev/null || true
+chown -R "$ADSB_USER":"$ADSB_USER" "$INSTALL_DIR"
+chmod 0750 "$INSTALL_DIR"
 
-# ---------------- [6/12] Configure Wi-Fi Hotspot (wlan1) ----------------
-echo "[6/12] Configuring Wi-Fi hotspot on wlan1..."
+# Web service binds port 80 without root via setcap on the venv python.
+setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/.venv/bin/python3" \
+    && ok "setcap cap_net_bind_service on venv python3 (so we can drop User=root)" \
+    || warn "setcap failed -- web UI will fall back to port 5000"
 
-mkdir -p /etc/network/interfaces.d/
-
-# hostapd configuration (Hotspot)
-cat > /etc/hostapd/hostapd.conf << 'EOF'
-# JLBMaritime ADS-B Hotspot Configuration
-interface=wlan1
-driver=nl80211
-ssid=JLBMaritime-ADSB
-hw_mode=g
-channel=1
-ieee80211d=1
-country_code=GB
-ieee80211n=1
-wmm_enabled=1
-macaddr_acl=0
-auth_algs=1
-ignore_broadcast_ssid=0
-wpa=3
-wpa_passphrase=Admin123
-wpa_key_mgmt=WPA-PSK
-wpa_pairwise=CCMP TKIP
-rsn_pairwise=CCMP
-beacon_int=100
-dtim_period=2
-EOF
-
-sed -i 's|#DAEMON_CONF=""|DAEMON_CONF="/etc/hostapd/hostapd.conf"|' /etc/default/hostapd \
-    || echo 'DAEMON_CONF="/etc/hostapd/hostapd.conf"' >> /etc/default/hostapd
-
-# dnsmasq configuration (DHCP/DNS for hotspot)
-[ -f /etc/dnsmasq.conf ] && mv /etc/dnsmasq.conf /etc/dnsmasq.conf.backup
-cat > /etc/dnsmasq.conf << 'EOF'
-# JLBMaritime ADS-B DNS/DHCP Configuration
-interface=wlan1
-bind-interfaces
-domain-needed
-bogus-priv
-
-dhcp-range=192.168.4.10,192.168.4.50,255.255.255.0,24h
-dhcp-option=3,192.168.4.1
-dhcp-option=6,192.168.4.1
-dhcp-authoritative
-
-server=8.8.8.8
-server=8.8.4.4
-address=/ADS-B.local/192.168.4.1
-domain=local
-EOF
-
-# wlan1 static IP
-cat > /etc/network/interfaces.d/wlan1 << 'EOF'
-auto wlan1
-iface wlan1 inet static
-    address 192.168.4.1
-    netmask 255.255.255.0
-EOF
-
-# wlan0 DHCP (internet)
-cat > /etc/network/interfaces.d/wlan0 << 'EOF'
-allow-hotplug wlan0
-iface wlan0 inet dhcp
-    wpa-conf /etc/wpa_supplicant/wpa_supplicant.conf
-EOF
-
-# Prevent wpa_supplicant from managing wlan1
-[ -f /etc/wpa_supplicant/wpa_supplicant-wlan1.conf ] && rm -f /etc/wpa_supplicant/wpa_supplicant-wlan1.conf
-
-cat > /etc/wpa_supplicant/wpa_supplicant.conf << 'EOF'
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-country=GB
-EOF
-
-systemctl disable wpa_supplicant@wlan1 2>/dev/null || true
-
-# Prevent NetworkManager from managing wlan1
+# ---------------------------------------------------------------------------
+# [7/14] NetworkManager drop-ins (powersave-off + DNS sanity)
+# ---------------------------------------------------------------------------
+say "[7/14] Installing NetworkManager drop-ins..."
 mkdir -p /etc/NetworkManager/conf.d
-cat > /etc/NetworkManager/conf.d/unmanage-wlan1.conf << 'EOF'
-[keyfile]
-unmanaged-devices=interface-name:wlan1
+install -m 0644 "$INSTALL_DIR/config/wifi-powersave-off.conf" \
+    /etc/NetworkManager/conf.d/00-wifi-powersave-off.conf
+# Pre-empt the "Tailscale broke my DNS" trap: declare dns=default
+# BEFORE Tailscale's installer drops dns=systemd-resolved.
+cat >/etc/NetworkManager/conf.d/00-dns.conf <<'EOF'
+[main]
+# RPi OS Lite does not ship systemd-resolved enabled, so we MUST stay
+# on dns=default.  Tailscale's installer will try to set this to
+# systemd-resolved -- the post-flight check at the end of install.sh
+# scrubs that file if it appears.
+dns=default
+rc-manager=file
 EOF
-systemctl is-active NetworkManager &>/dev/null && systemctl restart NetworkManager
+# dnsmasq drop-in for the per-AP private dnsmasq spawned by ipv4.method=shared
+mkdir -p /etc/NetworkManager/dnsmasq-shared.d
+install -m 0644 "$INSTALL_DIR/config/dnsmasq-shared-adsb.conf" \
+    /etc/NetworkManager/dnsmasq-shared.d/00-adsb-upstream.conf
 
-# ---------------- [7/12] Configure mDNS & Hostname ----------------
-echo "[7/12] Configuring mDNS (ADS-B.local) and hostname..."
-systemctl enable avahi-daemon
-systemctl start avahi-daemon
+# Final ';'-comment regression check (we just installed two files)
+if grep -lP '^[[:space:]]*;' /etc/NetworkManager/conf.d/*.conf >/dev/null 2>&1; then
+    fail "Just-installed NM conf.d files contain ';' comments.  This is a bug in the project."
+    exit 3
+fi
+systemctl is-active NetworkManager >/dev/null && nmcli general reload || systemctl restart NetworkManager
+ok "NetworkManager reloaded"
 
+# ---------------------------------------------------------------------------
+# [8/14] Materialise the AP profile on wlan1 (5 GHz, WPA2-CCMP)
+# ---------------------------------------------------------------------------
+say "[8/14] Creating NetworkManager profile 'adsb-hotspot' on wlan1 (5 GHz, ch 36)..."
+
+# Generate a fresh random PSK on every install.  This file is the
+# install-time SEED only; the source of truth for the live PSK is the
+# NetworkManager profile (read it back via `adsb-cli show-hotspot`).
+PSK_FILE="$INSTALL_DIR/HOTSPOT_PASSWORD.txt"
+if [[ ! -s "$PSK_FILE" ]]; then
+    HOTSPOT_PSK="$(tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | head -c 16)"
+    umask 077
+    printf '%s\n' "$HOTSPOT_PSK" > "$PSK_FILE"
+    chown "$ADSB_USER":"$ADSB_USER" "$PSK_FILE"
+    chmod 0600 "$PSK_FILE"
+    ok "Generated new 16-char PSK -> $PSK_FILE (mode 600)"
+else
+    HOTSPOT_PSK="$(<"$PSK_FILE")"
+    ok "Re-using existing PSK from $PSK_FILE"
+fi
+
+SSID="JLBMaritime-ADSB"
+# Country code: pull from /etc/default/crda or default to GB.
+COUNTRY=$(awk -F= '/^REGDOMAIN=/{gsub(/"/,"",$2); print $2}' /etc/default/crda 2>/dev/null || true)
+COUNTRY=${COUNTRY:-GB}
+iw reg set "$COUNTRY" 2>/dev/null || true
+
+# Recreate the profile from scratch so re-installs are idempotent.
+nmcli connection delete adsb-hotspot 2>/dev/null || true
+nmcli connection add type wifi ifname wlan1 con-name adsb-hotspot \
+    autoconnect yes \
+    ssid "$SSID"
+nmcli connection modify adsb-hotspot \
+    802-11-wireless.mode ap \
+    802-11-wireless.band a \
+    802-11-wireless.channel 36 \
+    802-11-wireless.powersave 2 \
+    802-11-wireless-security.key-mgmt wpa-psk \
+    802-11-wireless-security.proto rsn \
+    802-11-wireless-security.pairwise ccmp \
+    802-11-wireless-security.group ccmp \
+    802-11-wireless-security.pmf 1 \
+    802-11-wireless-security.psk "$HOTSPOT_PSK" \
+    ipv4.method shared \
+    ipv4.addresses 192.168.4.1/24 \
+    ipv4.shared-dhcp-lease-time 3600 \
+    ipv6.method disabled \
+    connection.autoconnect-priority 100 \
+    connection.zone trusted
+
+# Bring it up and verify activation (poll up to 20 s).
+nmcli connection up adsb-hotspot >/dev/null || true
+for i in $(seq 1 20); do
+    state=$(nmcli -t -f GENERAL.STATE connection show adsb-hotspot 2>/dev/null | cut -d: -f2 || true)
+    [[ "$state" == "activated" ]] && break
+    sleep 1
+done
+if [[ "$state" != "activated" ]]; then
+    fail "adsb-hotspot did not reach 'activated' after 20 s (state=$state)"
+    fail "Check 'journalctl -u NetworkManager --since \"1 min ago\"' for clues."
+    fail "Common causes:"
+    fail "  * wlan1 doesn't exist (USB dongle not detected) -- check 'iw dev'"
+    fail "  * Dongle on USB-3 with mt76x2u driver -- move to USB-2 (see [4/14])"
+    fail "  * Country code (\$COUNTRY=$COUNTRY) doesn't permit channel 36 outdoors"
+    journalctl -u NetworkManager --no-pager -n 30 || true
+    exit 4
+fi
+ok "AP 'JLBMaritime-ADSB' is up on wlan1, 5 GHz channel 36, WPA2-CCMP"
+
+# ---------------------------------------------------------------------------
+# [9/14] Hostname + mDNS
+# ---------------------------------------------------------------------------
+say "[9/14] Configuring hostname (ADS-B) and mDNS..."
 hostnamectl set-hostname ADS-B
-
-cat > /etc/hosts << 'EOF'
+cat >/etc/hosts <<'EOF'
 127.0.0.1       localhost
 127.0.1.1       ADS-B
 192.168.4.1     ADS-B.local
@@ -213,362 +368,261 @@ cat > /etc/hosts << 'EOF'
 ff02::1         ip6-allnodes
 ff02::2         ip6-allrouters
 EOF
+systemctl enable --now avahi-daemon
+ok "Hostname=ADS-B; mDNS enabled"
 
-# IP forwarding
-grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-sysctl -p > /dev/null
+# ---------------------------------------------------------------------------
+# [10/14] systemd units
+# ---------------------------------------------------------------------------
+say "[10/14] Installing systemd units..."
 
-# Firewall rules for hotspot
-if command -v ufw &> /dev/null; then
-    ufw allow in on wlan1 to any port 67 proto udp comment 'DHCP Server' 2>/dev/null || true
-    ufw allow in on wlan1 to any port 68 proto udp comment 'DHCP Client' 2>/dev/null || true
-    ufw allow in on wlan1 from 192.168.4.0/24 comment 'Hotspot network' 2>/dev/null || true
-    ufw status | grep -q "Status: active" && ufw reload || true
-fi
+install -m 0644 "$INSTALL_DIR/services/adsb-wifi-powersave-off.service" \
+    /etc/systemd/system/adsb-wifi-powersave-off.service
+install -m 0644 "$INSTALL_DIR/services/adsb-hotspot-watchdog.service" \
+    /etc/systemd/system/adsb-hotspot-watchdog.service
 
-# ---------------- [8/12] Install systemd Services (with Stability Limits) ----------------
-echo "[8/12] Installing systemd services with auto-restart and memory limits..."
-
-# wlan1 config service
-cp "$INSTALL_DIR/services/wlan1-config.service" /etc/systemd/system/
-
-# ADS-B Server with stability features
-cat > /etc/systemd/system/adsb-server.service << EOF
+# adsb-server.service: Type=simple, persistent TCP forwarder, waits for
+# dump1090-fa's port 30003 to be bound before starting.  Uses the venv
+# python3 so 'flask', 'sdnotify', 'psutil' all resolve.
+cat >/etc/systemd/system/adsb-server.service <<EOF
 [Unit]
-Description=ADS-B Server - Data Receiver and Forwarder
-After=network.target dump1090-fa.service
-Wants=dump1090-fa.service
+Description=ADS-B Forwarder (SBS1 from dump1090 -> configured endpoints)
+Documentation=file://$INSTALL_DIR/README.md
+# Wait for dump1090-fa to actually bind 30003 before we connect to it.
+# Without this the forwarder races dump1090 on boot and spews
+# "Connection refused" until the receiver finishes warming up.
+After=network-online.target dump1090-fa.service
+Wants=dump1090-fa.service network-online.target
 
 [Service]
 Type=simple
-User=$ACTUAL_USER
-Group=$ACTUAL_USER
+User=$ADSB_USER
+Group=$ADSB_USER
 WorkingDirectory=$INSTALL_DIR
-ExecStartPre=/bin/sleep 10
-ExecStart=/usr/bin/python3 $INSTALL_DIR/adsb_server/adsb_server.py
-StandardOutput=journal
-StandardError=journal
-
-# Auto-restart on any crash
+# Wait up to 60 s for SBS1 (30003) to be bound.  '|| true' lets us
+# proceed even on a Pi without dump1090-fa (rare) -- the forwarder
+# will simply log "Failed to connect" and retry on its own loop.
+ExecStartPre=/bin/sh -c 'for i in \$(seq 1 60); do ss -ltn | grep -q ":30003" && exit 0; sleep 1; done; exit 0'
+ExecStart=$INSTALL_DIR/.venv/bin/python3 $INSTALL_DIR/adsb_server/adsb_server.py
 Restart=always
 RestartSec=10s
-StartLimitInterval=300s
-StartLimitBurst=10
 
-# Resource limits (kill+restart if exceeded - prevents leaks)
+# Stability / leak guards
 MemoryMax=300M
 MemoryHigh=200M
 CPUQuota=80%
 LimitNOFILE=512
-TasksMax=50
+TasksMax=64
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$INSTALL_DIR/logs $INSTALL_DIR/config
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Web Manager with stability features
-cat > /etc/systemd/system/web-manager.service << EOF
+# web-manager.service: waitress on port 80, non-root, watchdog ping.
+cat >/etc/systemd/system/web-manager.service <<EOF
 [Unit]
-Description=ADS-B Wi-Fi Manager Web Interface
-After=network.target
+Description=ADS-B Wi-Fi Manager Web UI (waitress @ :80)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=$ADSB_USER
+Group=$ADSB_USER
 WorkingDirectory=$INSTALL_DIR
-ExecStart=/usr/bin/python3 $INSTALL_DIR/web_interface/app.py
-StandardOutput=journal
-StandardError=journal
-
-# Auto-restart on any crash
+ExecStart=$INSTALL_DIR/.venv/bin/python3 $INSTALL_DIR/web_interface/app.py
 Restart=always
 RestartSec=10s
-StartLimitInterval=300s
-StartLimitBurst=10
 
-# Resource limits
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$INSTALL_DIR/config $INSTALL_DIR/logs
+PrivateTmp=true
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Resource caps
 MemoryMax=300M
 MemoryHigh=200M
-CPUQuota=80%
+CPUQuota=60%
 LimitNOFILE=512
-TasksMax=50
+TasksMax=64
+
+Environment=PYTHONUNBUFFERED=1
+Environment=ADSB_HTTP_PORT=80
+
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable wlan1-config.service
+systemctl enable adsb-wifi-powersave-off.service
+systemctl enable adsb-hotspot-watchdog.service
 systemctl enable adsb-server.service
 systemctl enable web-manager.service
+ok "Units installed and enabled"
 
-# ---------------- [9/12] Hardware Watchdog (Auto-Recovery from Freeze) ----------------
-echo "[9/12] Enabling hardware watchdog (auto-reboots Pi if frozen)..."
-
-# Enable Pi watchdog in firmware config
-if ! grep -q "dtparam=watchdog=on" /boot/firmware/config.txt 2>/dev/null; then
-    echo "dtparam=watchdog=on" >> /boot/firmware/config.txt
+# ---------------------------------------------------------------------------
+# [11/14] Hardware watchdog (auto-reboot on freeze)
+# ---------------------------------------------------------------------------
+say "[11/14] Configuring hardware watchdog..."
+if [[ -f /boot/firmware/config.txt ]]; then
+    grep -q '^dtparam=watchdog=on' /boot/firmware/config.txt \
+        || echo 'dtparam=watchdog=on' >> /boot/firmware/config.txt
 fi
-
-# Load watchdog kernel module
 modprobe bcm2835_wdt 2>/dev/null || true
-grep -q "bcm2835_wdt" /etc/modules || echo "bcm2835_wdt" >> /etc/modules
-
-# Configure watchdog daemon
-cat > /etc/watchdog.conf << 'EOF'
-# ADS-B WiFi Manager Hardware Watchdog
-# Pi auto-reboots if system freezes for 15 seconds
-
+grep -q '^bcm2835_wdt' /etc/modules || echo 'bcm2835_wdt' >> /etc/modules
+cat >/etc/watchdog.conf <<'EOF'
 watchdog-device = /dev/watchdog
 watchdog-timeout = 15
 interval = 5
-
-# Reboot if system load too high (CPU stuck)
 max-load-1 = 24
 max-load-5 = 18
 max-load-15 = 12
-
-# Reboot if memory critically low
 min-memory = 1
-
-# Realtime priority for reliable kicks
 realtime = yes
 priority = 1
-
 log-dir = /var/log/watchdog
 verbose = yes
-
 retry-timeout = 60
 repair-timeout = 60
 EOF
-
 mkdir -p /var/log/watchdog
-
 mkdir -p /etc/systemd/system/watchdog.service.d
-cat > /etc/systemd/system/watchdog.service.d/override.conf << 'EOF'
+cat >/etc/systemd/system/watchdog.service.d/override.conf <<'EOF'
 [Service]
 Restart=always
 RestartSec=10
 EOF
-
 systemctl daemon-reload
 systemctl enable watchdog
+ok "Hardware watchdog enabled (15 s timeout, activates after reboot)"
 
-echo "      ✓ Hardware watchdog enabled (15s timeout)"
-echo "      ✓ Pi will auto-reboot if frozen - no power cycle needed!"
-
-# ---------------- [10/12] Health Monitor (Auto-Recovery) ----------------
-echo "[10/12] Installing system health monitor..."
-
-cat > /usr/local/bin/adsb-health-monitor.sh << 'EOF'
-#!/bin/bash
-# ADS-B System Health Monitor - runs every 10 minutes
-# Logs status and auto-restarts services if down
-
-THROTTLED=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)
-TEMP=$(vcgencmd measure_temp 2>/dev/null | cut -d= -f2 | cut -d"'" -f1)
-LOAD=$(cat /proc/loadavg | awk '{print $1}')
-MEM_FREE=$(free -m | awk '/^Mem:/{print $7}')
-DISK_USE=$(df -h / | awk 'NR==2{print $5}')
-
-ADSB_STATUS=$(systemctl is-active adsb-server)
-WEB_STATUS=$(systemctl is-active web-manager)
-
-logger -t adsb-health "Throttled=$THROTTLED Temp=${TEMP}C Load=$LOAD MemFree=${MEM_FREE}MB Disk=$DISK_USE ADSB=$ADSB_STATUS Web=$WEB_STATUS"
-
-# Critical: throttling = power supply or thermal issue
-if [ "$THROTTLED" != "0x0" ]; then
-    logger -t adsb-health "WARNING: System throttled ($THROTTLED) - check power supply or cooling"
-fi
-
-# Auto-restart services if down
-if [ "$ADSB_STATUS" != "active" ]; then
-    logger -t adsb-health "ERROR: ADS-B server inactive, restarting..."
-    systemctl restart adsb-server
-fi
-if [ "$WEB_STATUS" != "active" ]; then
-    logger -t adsb-health "ERROR: Web manager inactive, restarting..."
-    systemctl restart web-manager
-fi
-
-exit 0
-EOF
-chmod +x /usr/local/bin/adsb-health-monitor.sh
-
-cat > /etc/systemd/system/adsb-health.service << 'EOF'
-[Unit]
-Description=ADS-B System Health Monitor
-After=multi-user.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/adsb-health-monitor.sh
-EOF
-
-cat > /etc/systemd/system/adsb-health.timer << 'EOF'
-[Unit]
-Description=Run ADS-B Health Monitor every 10 minutes
-Requires=adsb-health.service
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
-Unit=adsb-health.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
-systemctl daemon-reload
-systemctl enable adsb-health.timer
-
-# ---------------- [11/12] SD Card Protection & Log Rotation ----------------
-echo "[11/12] Configuring SD card protection and log rotation..."
-
-# App log rotation
-cat > /etc/logrotate.d/adsb-wifi-manager << EOF
-$INSTALL_DIR/logs/*.log {
-    daily
-    rotate 3
-    compress
-    delaycompress
-    missingok
-    notifempty
-    copytruncate
-    maxsize 10M
-}
-EOF
-
-# Limit systemd journal size
-mkdir -p /etc/systemd/journald.conf.d
-cat > /etc/systemd/journald.conf.d/size-limit.conf << 'EOF'
-[Journal]
-SystemMaxUse=200M
-SystemMaxFileSize=50M
-MaxRetentionSec=7day
-EOF
-systemctl restart systemd-journald
-
-# SD card optimizations - reduce wear
-grep -q "noatime" /etc/fstab || sed -i 's|defaults\b|defaults,noatime|' /etc/fstab || true
-grep -q "^vm.swappiness" /etc/sysctl.conf || { echo "vm.swappiness=10" >> /etc/sysctl.conf; sysctl -p > /dev/null; }
-
-# Disable unattended upgrades (prevents random reboots)
-systemctl stop apt-daily.timer 2>/dev/null || true
-systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
-systemctl mask apt-daily.timer 2>/dev/null || true
-systemctl mask apt-daily-upgrade.timer 2>/dev/null || true
-
-# ---------------- [12/12] Install CLI & Permissions, Start Services ----------------
-echo "[12/12] Installing CLI tool and configuring permissions..."
-
-# CLI tool symlink
-rm -f /usr/local/bin/adsb-cli
-chmod +x "$INSTALL_DIR/cli/adsb_cli.py"
-ln -s "$INSTALL_DIR/cli/adsb_cli.py" /usr/local/bin/adsb-cli
-
-# Sudo permissions for web interface
-cat > /etc/sudoers.d/adsb-wifi-manager << 'EOF'
-# Allow web interface to control services and Wi-Fi
-www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl start adsb-server
-www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop adsb-server
-www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart adsb-server
-www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl is-active adsb-server
-www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl show adsb-server
-www-data ALL=(ALL) NOPASSWD: /usr/sbin/iwlist
-www-data ALL=(ALL) NOPASSWD: /usr/sbin/iwconfig
-www-data ALL=(ALL) NOPASSWD: /usr/sbin/wpa_cli
-www-data ALL=(ALL) NOPASSWD: /usr/sbin/dhclient
-www-data ALL=(ALL) NOPASSWD: /usr/bin/ip
-root ALL=(ALL) NOPASSWD: /usr/bin/systemctl start adsb-server
-root ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop adsb-server
-root ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart adsb-server
-root ALL=(ALL) NOPASSWD: /usr/bin/systemctl is-active adsb-server
-root ALL=(ALL) NOPASSWD: /usr/bin/systemctl show adsb-server
+# ---------------------------------------------------------------------------
+# [12/14] Sudoers (so the web UI can call nmcli, systemctl, iw)
+# ---------------------------------------------------------------------------
+say "[12/14] Installing sudoers drop-in for $ADSB_USER..."
+cat >/etc/sudoers.d/adsb-wifi-manager <<EOF
+# adsb-wifi-manager -- least-privilege command list for the web UI.
+# Reload with 'sudo visudo -c -f /etc/sudoers.d/adsb-wifi-manager'.
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/nmcli
+$ADSB_USER ALL=(root) NOPASSWD: /usr/sbin/iw
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/ip
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart adsb-server.service
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop adsb-server.service
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start adsb-server.service
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart adsb-hotspot-watchdog.service
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl is-active adsb-server.service
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl show adsb-server.service
 EOF
 chmod 0440 /etc/sudoers.d/adsb-wifi-manager
+visudo -cf /etc/sudoers.d/adsb-wifi-manager >/dev/null && ok "Sudoers OK"
 
-# Start hotspot services
-echo ""
-echo "Starting services..."
-systemctl unmask hostapd
-systemctl enable hostapd
-systemctl enable dnsmasq
+# ---------------------------------------------------------------------------
+# [13/14] CLI shim (`adsb-cli`)
+# ---------------------------------------------------------------------------
+say "[13/14] Installing adsb-cli shim..."
+chmod +x "$INSTALL_DIR/cli/adsb_cli.py"
+cat >/usr/local/bin/adsb-cli <<EOF
+#!/bin/sh
+exec $INSTALL_DIR/.venv/bin/python3 $INSTALL_DIR/cli/adsb_cli.py "\$@"
+EOF
+chmod +x /usr/local/bin/adsb-cli
+ok "adsb-cli installed (try: sudo adsb-cli show-hotspot)"
 
-# Bring up wlan1
-ip link set wlan1 down 2>/dev/null || true
-sleep 2
-ip link set wlan1 up 2>/dev/null || true
-sleep 1
-ip addr add 192.168.4.1/24 dev wlan1 2>/dev/null || true
-iw dev wlan1 set power_save off 2>/dev/null || true
-iwconfig wlan1 power off 2>/dev/null || true
-sleep 3
-
-systemctl start hostapd 2>/dev/null || true
-sleep 2
-systemctl start dnsmasq 2>/dev/null || true
-
-# Wait for dump1090-fa
-if systemctl is-enabled dump1090-fa &>/dev/null; then
-    sleep 5
+# ---------------------------------------------------------------------------
+# [14/14] Optional: Tailscale + start everything + post-flight
+# ---------------------------------------------------------------------------
+if [[ $WITH_TAILSCALE -eq 1 ]]; then
+    say "[14a/14] Installing Tailscale..."
+    if ! command -v tailscale >/dev/null 2>&1; then
+        curl -fsSL https://tailscale.com/install.sh | sh
+    fi
+    # Scrub the dns=systemd-resolved trap if present.
+    rm -f /etc/NetworkManager/conf.d/tailscale.conf
+    systemctl is-active NetworkManager >/dev/null && nmcli general reload
+    systemctl enable --now tailscaled
+    ok "Tailscale installed.  Run 'sudo tailscale up --ssh' when ready."
 fi
 
-# Start application services
-systemctl start adsb-server.service 2>/dev/null || true
-sleep 2
-systemctl start web-manager.service 2>/dev/null || true
-systemctl start adsb-health.timer 2>/dev/null || true
+say "[14/14] Starting services + post-flight..."
+systemctl try-restart adsb-wifi-powersave-off.service || systemctl start adsb-wifi-powersave-off.service
+systemctl try-restart adsb-hotspot-watchdog.service   || systemctl start adsb-hotspot-watchdog.service
+systemctl try-restart adsb-server.service             || systemctl start adsb-server.service
+systemctl try-restart web-manager.service             || systemctl start web-manager.service
 
-# ==================== Done ====================
-echo ""
-echo "=================================================="
-echo "✅ Installation Complete!"
-echo "=================================================="
-echo ""
-echo "Setup Summary:"
-echo "  Hostname:           ADS-B"
-echo "  Hotspot SSID:       JLBMaritime-ADSB"
-echo "  Hotspot Password:   Admin123"
-echo "  Hotspot IP:         192.168.4.1"
-echo "  Web Interface:      http://ADS-B.local or http://192.168.4.1"
-echo "  Web Login:          JLBMaritime / Admin"
-echo ""
-echo "Stability Features:"
-echo "  ✓ Hardware Watchdog (auto-reboot if frozen)"
-echo "  ✓ Service auto-restart on crash"
-echo "  ✓ Memory limits (300MB) - prevents leaks"
-echo "  ✓ Health monitor (every 10 min)"
-echo "  ✓ Resource leak fixes (sockets, threads)"
-echo "  ✓ Log rotation (prevents SD fill)"
-echo "  ✓ SD card optimizations (noatime, low swap)"
-echo "  ✓ Auto-updates disabled (no random reboots)"
-echo ""
-echo "Service Status:"
-systemctl is-active hostapd     >/dev/null && echo "  ✓ Hotspot:        Running" || echo "  ✗ Hotspot:        Not Running"
-systemctl is-active dnsmasq     >/dev/null && echo "  ✓ DNS/DHCP:       Running" || echo "  ✗ DNS/DHCP:       Not Running"
-systemctl is-active adsb-server >/dev/null && echo "  ✓ ADS-B Server:   Running" || echo "  ✗ ADS-B Server:   Not Running"
-systemctl is-active web-manager >/dev/null && echo "  ✓ Web Manager:    Running" || echo "  ✗ Web Manager:    Not Running"
-systemctl is-active dump1090-fa >/dev/null && echo "  ✓ dump1090-fa:    Running" || echo "  ✗ dump1090-fa:    Not Running (install manually)"
-systemctl is-enabled watchdog   >/dev/null && echo "  ✓ Watchdog:       Enabled (activates after reboot)" || echo "  ✗ Watchdog:       Not enabled"
-systemctl is-enabled adsb-health.timer >/dev/null && echo "  ✓ Health Monitor: Enabled" || echo "  ✗ Health Monitor: Not enabled"
-echo ""
-echo "Next Steps:"
-echo "  1. REBOOT NOW to activate hardware watchdog: sudo reboot"
-echo "  2. After reboot, connect to 'JLBMaritime-ADSB' Wi-Fi (password: Admin123)"
-echo "  3. Open browser to http://ADS-B.local"
-echo "  4. Login: JLBMaritime / Admin"
-echo "  5. Configure Wi-Fi for internet (Wi-Fi Manager tab)"
-echo "  6. Configure ADS-B endpoints (ADS-B Configuration tab)"
-echo "  7. Place logo.png in: $INSTALL_DIR/web_interface/static/"
-echo ""
-echo "Management:"
-echo "  CLI Tool:    adsb-cli"
-echo "  SSH:         ssh JLBMaritime@ADS-B.local"
-echo "  Logs:        sudo journalctl -u adsb-server -f"
-echo "  Health:      sudo journalctl -t adsb-health -f"
-echo ""
-echo "🔴 IMPORTANT: REBOOT REQUIRED for hardware watchdog!"
-echo "   sudo reboot"
-echo "=================================================="
+sleep 3
+post_ok=1
+for svc in NetworkManager adsb-hotspot-watchdog adsb-server web-manager; do
+    if systemctl is-active "$svc" >/dev/null 2>&1; then
+        ok "$svc active"
+    else
+        fail "$svc NOT active -- journalctl -u $svc -n 50 --no-pager"
+        post_ok=0
+    fi
+done
+
+# Live healthz
+if curl -fsS --max-time 3 "http://127.0.0.1/healthz" >/dev/null 2>&1; then
+    ok "GET /healthz returned 200"
+elif curl -fsS --max-time 3 "http://127.0.0.1:5000/healthz" >/dev/null 2>&1; then
+    warn "Web UI fell back to :5000 (port 80 not bound -- check setcap)"
+else
+    warn "Could not reach /healthz on :80 or :5000 yet -- service may still be warming up"
+fi
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+echo
+echo "=========================================================================="
+if [[ $post_ok -eq 1 ]]; then
+    printf "${GRN}Installation complete.${RST}\n"
+else
+    printf "${YLW}Installation finished with warnings -- review above.${RST}\n"
+fi
+echo "=========================================================================="
+cat <<EOF
+  Web UI (over hotspot):   http://192.168.4.1/
+  Web UI (over LAN):       http://ADS-B.local/   or   http://<pi-ip>/
+  Login:                   JLBMaritime / Admin   (forced change on first login)
+
+  Hotspot SSID:            JLBMaritime-ADSB    (5 GHz, channel 36, WPA2-CCMP)
+  Hotspot PSK:             $(cat "$PSK_FILE")
+                           ^^ also stored at: $PSK_FILE
+                           reveal at any time:  sudo adsb-cli show-hotspot
+                           rotate:               sudo adsb-cli rotate-pw
+
+  Receiver port map:
+    1090 MHz radio  -> dump1090-fa
+                       :30002  raw OUT (open)         } readable by AP
+                       :30003  SBS1 OUT (open)        } clients on
+                       :30005  Beast OUT (open)       } JLBMaritime-ADSB
+                       :8080   SkyAware web (open)    }
+                       :30001/4/30104 raw IN (firewalled OFF on wlan1)
+
+  Diagnose anytime:        sudo adsb-cli doctor
+  Live forwarder logs:     sudo journalctl -u adsb-server -f
+  Live AP supervisor:      sudo journalctl -u adsb-hotspot-watchdog -f -o cat
+
+  REBOOT now to activate the hardware watchdog:  sudo reboot
+EOF
+
+# IMPORTANT: see README troubleshooting "USB Wi-Fi dongle keeps dropping out
+# (mt76x2u + Pi 4B USB-3 bug)" if the AP is intermittent.
+exit 0

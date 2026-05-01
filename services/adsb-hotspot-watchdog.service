@@ -1,0 +1,43 @@
+[Unit]
+# Self-healing supervisor for the `adsb-hotspot` NetworkManager
+# connection on wlan1.  Polls every 5 s; if the AP is anything other
+# than `activated` for >=15 s, runs `nmcli c up adsb-hotspot` with
+# exponential backoff (5 -> 10 -> 20 -> 40 -> 80 -> 160 -> 300 s,
+# capped) until it comes back.  Recovers from:
+#   * mt76x2u USB-3 instability (wlan1 momentarily drops off the bus)
+#   * `systemctl restart NetworkManager` (NM brings up wlan0 first
+#     and adsb-hotspot can race-lose without this)
+#   * any kernel-side RF kill / regulatory-domain bounce
+#   * suspend/resume on a USB power blip
+Description=ADS-B Hotspot watchdog (auto-revives the AP on wlan1)
+Documentation=man:NetworkManager(8)
+After=NetworkManager.service network-online.target
+Wants=NetworkManager.service
+PartOf=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /opt/adsb-wifi-manager/adsb_server/_hotspot_watchdog.py
+Restart=always
+RestartSec=10s
+StartLimitBurst=10
+StartLimitInterval=600s
+
+# Hardening -- this unit only ever calls `nmcli` and reads sysfs.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+# Allow networking + the netlink socket nmcli speaks over.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

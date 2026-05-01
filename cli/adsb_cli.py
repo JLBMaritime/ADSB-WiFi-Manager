@@ -13,6 +13,24 @@ import subprocess
 # Add parent directory to path (resolve symlinks for global installation)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
+# ---------------------------------------------------------------------------
+# Non-interactive sub-command dispatch
+# ---------------------------------------------------------------------------
+# When the user runs `adsb-cli show-hotspot` (or any other subcommand)
+# we hand off to cli/_subcommands.py and exit.  When the user just runs
+# `adsb-cli` with no args, we fall through to the original interactive
+# menu below.  This keeps backwards compatibility with the SSH menu
+# while adding the scriptable commands install.sh / doctor / monitoring
+# need.
+# ---------------------------------------------------------------------------
+_KNOWN_SUBCOMMANDS = {
+    "show-hotspot", "rotate-pw", "health", "doctor", "update",
+    "-h", "--help",
+}
+if len(sys.argv) > 1 and sys.argv[1] in _KNOWN_SUBCOMMANDS:
+    from cli._subcommands import main as _sub_main
+    sys.exit(_sub_main(sys.argv[1:]))
+
 from cli.utils import *
 from cli.wifi_menu import show_wifi_menu
 from cli.adsb_menu import show_adsb_menu

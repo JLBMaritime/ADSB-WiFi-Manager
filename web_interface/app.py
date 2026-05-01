@@ -4,10 +4,12 @@ Web Application - Flask-based management interface
 Part of JLBMaritime ADS-B & Wi-Fi Management System
 """
 
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, Response, make_response
 import sys
 import os
+import secrets
 import configparser
+import socket
 import subprocess
 import json
 from functools import wraps
@@ -19,7 +21,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from wifi_manager.wifi_controller import WiFiController
 
 app = Flask(__name__)
-app.secret_key = 'jlbmaritime-adsb-secret-key-change-in-production'
+
+# --------------------------------------------------------------------------
+# Persistent SECRET_KEY
+# Was: hard-coded string in source.  Anyone with the repo could forge any
+# session cookie.  Persist a random key at /opt/adsb-wifi-manager/secret_key
+# (mode 600), regenerate only if missing.  Same pattern as AIS-WiFi-Manager.
+# --------------------------------------------------------------------------
+_SECRET_KEY_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'secret_key')
+try:
+    if not os.path.exists(_SECRET_KEY_PATH):
+        with open(_SECRET_KEY_PATH, 'wb') as _f:
+            _f.write(secrets.token_bytes(48))
+        try:
+            os.chmod(_SECRET_KEY_PATH, 0o600)
+        except OSError:
+            pass
+    with open(_SECRET_KEY_PATH, 'rb') as _f:
+        app.secret_key = _f.read()
+except OSError:
+    # Fall back to ephemeral (sessions invalidate every restart).
+    app.secret_key = secrets.token_bytes(48)
 
 # Production mode detection
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
@@ -107,6 +129,115 @@ def health_check():
         'production_mode': PRODUCTION_MODE,
         'timestamp': datetime.now().isoformat()
     })
+
+
+@app.route('/healthz')
+def healthz():
+    """Liveness probe used by install.sh post-flight, by `adsb-cli doctor`,
+    and by external uptime checkers (e.g. Uptime Kuma over Tailscale).
+    Returns 200 when:
+      * the dump1090-fa SBS1 socket is reachable on 127.0.0.1:30003, AND
+      * the adsb-server unit is in `active` state.
+    Otherwise 503 with a JSON body explaining which check failed.
+    No @login_required by design.
+    """
+    checks = {}
+    overall = True
+
+    # 1) SBS1 socket reachable?
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(('127.0.0.1', 30003))
+        checks['sbs1_30003'] = 'ok'
+    except OSError as e:
+        checks['sbs1_30003'] = f'fail: {e!s}'
+        overall = False
+
+    # 2) adsb-server unit active?
+    try:
+        rc = subprocess.run(['systemctl', 'is-active', 'adsb-server'],
+                            capture_output=True, text=True, timeout=2)
+        active = (rc.stdout.strip() == 'active')
+        checks['adsb_server_unit'] = 'ok' if active else f'fail: {rc.stdout.strip()}'
+        overall = overall and active
+    except Exception as e:
+        checks['adsb_server_unit'] = f'fail: {e!s}'
+        overall = False
+
+    body = {'status': 'ok' if overall else 'fail', 'checks': checks,
+            'timestamp': datetime.now().isoformat()}
+    return jsonify(body), (200 if overall else 503)
+
+
+# ============================================================================
+# CAPTIVE-PORTAL PROBE RESPONDERS
+# ============================================================================
+# DO NOT add @login_required to any route in this block.
+#
+# When a phone joins the AP it immediately fires probes at well-known
+# URLs to decide whether the network has internet.  The matching
+# /etc/NetworkManager/dnsmasq-shared.d/00-adsb-upstream.conf redirects
+# those domains at 192.168.4.1 -- here we answer the HTTP probes with
+# the magic byte sequence each OS expects.  Without these, phones mark
+# the AP as "no internet, secured" and may refuse to keep traffic on
+# it (Android 12+ / iOS 14+ are the worst offenders).
+#
+# The reference matrix (verified 2024-08, re-verified 2026-04):
+#   Apple  /hotspot-detect.html         -> 200 + "<HTML>...Success...</HTML>"
+#   Apple  /library/test/success.html   -> 200 + same body
+#   Android  /generate_204               -> 204 No Content
+#   Windows  /connecttest.txt            -> 200 + "Microsoft Connect Test"
+#   Windows  /ncsi.txt                   -> 200 + "Microsoft NCSI"
+#   GNOME   /check_network_status.txt   -> 200 + "NetworkManager is online"
+# ============================================================================
+_APPLE_OK_BODY = (
+    '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">'
+    '<HTML><HEAD><TITLE>Success</TITLE></HEAD>'
+    '<BODY>Success</BODY></HTML>'
+)
+
+
+@app.route('/hotspot-detect.html')
+@app.route('/library/test/success.html')
+def _captive_apple():
+    return Response(_APPLE_OK_BODY, mimetype='text/html')
+
+
+@app.route('/generate_204')
+@app.route('/gen_204')
+def _captive_android():
+    return ('', 204)
+
+
+@app.route('/connecttest.txt')
+def _captive_msft_connecttest():
+    return Response('Microsoft Connect Test', mimetype='text/plain')
+
+
+@app.route('/ncsi.txt')
+def _captive_msft_ncsi():
+    return Response('Microsoft NCSI', mimetype='text/plain')
+
+
+@app.route('/check_network_status.txt')
+def _captive_gnome():
+    return Response('NetworkManager is online', mimetype='text/plain')
+
+
+# Some Android builds probe the bare hostname over HTTP -- we want a
+# 200 body, NOT a redirect to /login (which trips the captive sheet).
+# We special-case the well-known probe User-Agents.
+@app.before_request
+def _captive_useragent_short_circuit():
+    ua = (request.headers.get('User-Agent') or '').lower()
+    path = request.path or '/'
+    if path == '/' and any(t in ua for t in (
+            'captiveportal', 'captivenetworksupport', 'dalvik', 'wisp',
+            'connectivity', 'ncsi')):
+        return ('', 204)
+    return None
+
 
 # ============= API ENDPOINTS =============
 
@@ -488,23 +619,62 @@ def backup_config():
 if __name__ == '__main__':
     # Ensure config directory exists
     os.makedirs(os.path.join(BASE_DIR, 'config'), exist_ok=True)
-    
+
     # Create default config if it doesn't exist
+    # NB: json_port is 8080, NOT 30047.  v1 of this file wrote 30047
+    # (which is piaware's status JSON, not dump1090-fa's aircraft.json),
+    # while adsb_server.py defaulted to 8080 -- result: aircraft counts
+    # always read 0 on a fresh install.  This is the canonical port now.
     if not os.path.exists(ADSB_CONFIG_PATH):
         config = configparser.ConfigParser()
-        config['Dump1090'] = {'host': '127.0.0.1', 'sbs1_port': '30003', 'json_port': '30047'}
+        config['Dump1090'] = {'host': '127.0.0.1', 'sbs1_port': '30003', 'json_port': '8080'}
         config['Output'] = {'format': 'sbs1'}
-        config['Filter'] = {'mode': 'specific', 'icao_list': 'A92F2D,A932E4,A9369B,A93A52', 
+        config['Filter'] = {'mode': 'specific', 'icao_list': 'A92F2D,A932E4,A9369B,A93A52',
                            'altitude_filter_enabled': 'false', 'max_altitude': '10000'}
         config['Endpoints'] = {'count': '0'}
         with open(ADSB_CONFIG_PATH, 'w') as f:
             config.write(f)
-            
+    else:
+        # Migrate the 30047 bug on existing installs.
+        _mig = configparser.ConfigParser()
+        _mig.read(ADSB_CONFIG_PATH)
+        if _mig.has_section('Dump1090') and _mig.get('Dump1090', 'json_port', fallback='') == '30047':
+            _mig.set('Dump1090', 'json_port', '8080')
+            with open(ADSB_CONFIG_PATH, 'w') as _f:
+                _mig.write(_f)
+            print('[config] migrated Dump1090.json_port 30047 -> 8080')
+
     if not os.path.exists(WEB_CONFIG_PATH):
         config = configparser.ConfigParser()
         config['Auth'] = {'username': 'JLBMaritime', 'password': 'Admin'}
         with open(WEB_CONFIG_PATH, 'w') as f:
             config.write(f)
-    
-    # Run server
-    app.run(host='0.0.0.0', port=5000, debug=False)
+
+    # ------------------------------------------------------------------
+    # Serve the app
+    # ------------------------------------------------------------------
+    # The ADSB_HTTP_PORT env var is set to 80 by the systemd unit, with
+    # CAP_NET_BIND_SERVICE granted via setcap on the venv python.  If
+    # binding 80 fails (running outside systemd, or setcap missing), we
+    # fall back to 5000 so the operator can still reach the UI.
+    # We use waitress (production-grade WSGI) instead of Flask's
+    # development server -- the dev server is single-threaded, has no
+    # request timeout, and prints "WARNING: This is a development
+    # server" every restart.
+    # ------------------------------------------------------------------
+    desired_port = int(os.environ.get('ADSB_HTTP_PORT', '80'))
+    bind_host = os.environ.get('ADSB_HTTP_HOST', '0.0.0.0')
+    try:
+        from waitress import serve
+        try:
+            serve(app, host=bind_host, port=desired_port, threads=8,
+                  ident='adsb-wifi-manager', clear_untrusted_proxy_headers=True)
+        except (PermissionError, OSError) as port_err:
+            print(f'[web] could not bind {bind_host}:{desired_port} ({port_err}); '
+                  f'falling back to 5000', flush=True)
+            serve(app, host=bind_host, port=5000, threads=8,
+                  ident='adsb-wifi-manager', clear_untrusted_proxy_headers=True)
+    except ImportError:
+        # Last-ditch fallback for development on a machine without waitress.
+        print('[web] waitress not installed, using Flask dev server on :5000', flush=True)
+        app.run(host=bind_host, port=5000, debug=False)
