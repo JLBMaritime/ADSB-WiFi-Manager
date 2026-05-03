@@ -469,8 +469,15 @@ def update_adsb_config():
         with open(ADSB_CONFIG_PATH, 'w') as f:
             config.write(f)
             
-        # Restart ADS-B service
-        subprocess.run(['sudo', 'systemctl', 'restart', 'adsb-server'])
+        # Restart ADS-B service.
+        # NB: '.service' suffix is REQUIRED -- the sudoers drop-in installed
+        # by install.sh whitelists exactly '/usr/bin/systemctl restart
+        # adsb-server.service'.  sudo does string-equal matching on every
+        # argv, so the bare 'adsb-server' form is denied (rc=1) and the
+        # restart silently fails to take effect.  Symptom on the UI: config
+        # appears to save but new options aren't picked up by the forwarder.
+        subprocess.run(['sudo', '-n', 'systemctl', 'restart',
+                        'adsb-server.service'], check=False)
         
         return jsonify({'success': True})
     except Exception as e:
@@ -479,15 +486,33 @@ def update_adsb_config():
 @app.route('/api/adsb/service/<action>', methods=['POST'])
 @login_required
 def adsb_service_control(action):
-    """Control ADS-B service"""
+    """Control ADS-B service.
+
+    NB: the sudoers rules installed by install.sh permit ONLY the fully
+    qualified unit name ('adsb-server.service').  The previous version
+    of this route passed bare 'adsb-server' which sudo refused -> the
+    Start/Stop/Restart buttons in the UI all returned a generic
+    'Failed to ... ADS-B server' alert.  Use the canonical name and
+    pass '-n' (non-interactive) so we fail fast with a clear log line
+    instead of hanging if sudoers ever drifts.
+    """
     try:
-        if action in ['start', 'stop', 'restart']:
-            subprocess.run(['sudo', 'systemctl', action, 'adsb-server'], check=True)
-            return jsonify({'success': True})
-        else:
-            return jsonify({'success': False, 'error': 'Invalid action'})
+        if action not in ('start', 'stop', 'restart'):
+            return jsonify({'success': False, 'error': 'Invalid action'}), 400
+
+        result = subprocess.run(
+            ['sudo', '-n', 'systemctl', action, 'adsb-server.service'],
+            capture_output=True, text=True, timeout=20)
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or '').strip() \
+                  or f'systemctl {action} returned rc={result.returncode}'
+            return jsonify({'success': False, 'error': err}), 500
+        return jsonify({'success': True})
+    except subprocess.TimeoutExpired:
+        return jsonify({'success': False,
+                        'error': f'systemctl {action} timed out'}), 504
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/adsb/test-endpoint', methods=['POST'])
 @login_required

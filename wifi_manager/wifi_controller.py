@@ -62,8 +62,26 @@ _NMCLI_COLON = re.compile(r'(?<!\\):')
 
 
 def _split_nmcli(line: str):
-    """Split an `nmcli -t` row on unescaped colons and unescape each cell."""
-    return [cell.replace(r'\:', ':').replace(r'\\', '\\') for cell in _NMCLI_COLON.split(line)]
+    """Split an `nmcli -t` row on unescaped colons and unescape each cell.
+
+    nmcli's `-t` (terse) output uses ':' as the column separator and
+    backslash-escapes any literal ':' or '\\' that appear inside a cell.
+    Order matters: we MUST unescape '\\\\' (literal backslash) BEFORE
+    '\\:' (escaped colon), otherwise '\\\\:' (a literal backslash next to
+    a real separator) would round-trip through the wrong order and turn
+    into '\\:' (an escaped colon) by accident.  In practice nmcli
+    rarely emits literal backslashes in SSIDs, but the ordering bug
+    has bitten parsers in adjacent projects -- belt and braces.
+    """
+    cells = _NMCLI_COLON.split(line)
+    out = []
+    for cell in cells:
+        cell = cell.replace('\\\\', '\x00')   # placeholder
+        cell = cell.replace('\\:', ':')
+        cell = cell.replace('\x00', '\\')
+        out.append(cell)
+    return out
+
 
 
 class WiFiController:
@@ -223,52 +241,80 @@ class WiFiController:
     # Current
     # ----------------------------------------------------------------
     def get_current_network(self):
-        """Return what wlan0 is currently associated with (or None)."""
+        """Return what wlan0 is currently associated with (or None).
+
+        Implementation note: an earlier version of this method used
+            `nmcli -t -f GENERAL.CONNECTION,GENERAL.STATE,IP4.ADDRESS \
+                  device show <iface>`
+        which superficially looks fine but is fragile across NM
+        versions: `IP4.ADDRESS` is a section *prefix* (the actual key
+        is `IP4.ADDRESS[1]`), and on NM 1.42+ the `-f` filter against
+        `device show` for that prefix sometimes produces an rc!=0 with
+        empty stdout, which our error handler then maps to None ->
+        the UI shows "Not connected" even when wlan0 is happily
+        associated.
+
+        The form below uses `nmcli -t -f DEVICE,STATE,CONNECTION
+        device status` which has been stable since NM 1.10 and yields
+        exactly one tabular row per interface.  We get the IP from
+        `ip -4 addr show` (already used by get_ip_address) -- no
+        nmcli ambiguity at all.
+        """
         try:
-            r = self._nmcli('-t', '-f',
-                            'GENERAL.CONNECTION,GENERAL.STATE,IP4.ADDRESS',
-                            'device', 'show', self.interface, timeout=10)
-            info = {}
+            # 1) Identify the active connection name on our interface.
+            r = self._nmcli('-t', '-f', 'DEVICE,STATE,CONNECTION',
+                            'device', 'status', timeout=10)
+            conn_name = None
             for raw in r.stdout.splitlines():
-                if ':' not in raw:
+                parts = _split_nmcli(raw)
+                if len(parts) < 3:
                     continue
-                # device show output is "KEY:VALUE" -- the first ':'
-                # is the separator; embedded ':' in IP6 etc. is fine
-                key, _, value = raw.partition(':')
-                info[key.strip()] = value.strip()
-            conn_name = info.get('GENERAL.CONNECTION', '').strip()
-            if not conn_name or conn_name in ('--', ''):
+                dev, state, name = parts[0], parts[1], parts[2]
+                if dev != self.interface:
+                    continue
+                # State strings: 'connected', 'connecting', 'disconnected',
+                # 'unavailable', 'unmanaged'.  Only 'connected' counts.
+                if state != 'connected':
+                    return None
+                if name and name != '--':
+                    conn_name = name
+                break
+            if not conn_name:
                 return None
 
-            # IP: nmcli -t puts every address on a numbered key
-            # like IP4.ADDRESS[1] = 192.168.0.232/24
-            ip = ''
-            for k, v in info.items():
-                if k.startswith('IP4.ADDRESS') and v:
-                    ip = v.split('/')[0]
-                    break
+            # 2) IP from `ip -4 addr show wlan0` -- canonical and never
+            #    ambiguous.
+            ip = self.get_ip_address() or 'Unknown'
 
+            # 3) SSID is what the operator actually cares about; the NM
+            #    profile name might be 'preconfigured' (RPi imager) or
+            #    something operator-set.  Resolve to the SSID stored
+            #    inside the profile, falling back to the profile name.
             ssid = self._get_profile_ssid(conn_name) or conn_name
 
-            # Signal: scan list, find the row marked '*' (in-use)
+            # 4) Signal: pick the row marked '*' (in-use) from the scan
+            #    list.  Best-effort -- if the scan call fails for any
+            #    reason we just return signal=0 rather than failing the
+            #    whole call.
             signal = 0
             try:
                 s = self._nmcli('-t', '-f', 'IN-USE,SIGNAL', 'device', 'wifi',
                                 'list', 'ifname', self.interface, timeout=10)
-                for raw in s.stdout.splitlines():
-                    parts = _split_nmcli(raw)
-                    if len(parts) >= 2 and parts[0] == '*':
-                        try:
-                            signal = int(parts[1])
-                        except ValueError:
-                            pass
-                        break
+                if s.returncode == 0:
+                    for raw in s.stdout.splitlines():
+                        parts = _split_nmcli(raw)
+                        if len(parts) >= 2 and parts[0] == '*':
+                            try:
+                                signal = int(parts[1])
+                            except ValueError:
+                                pass
+                            break
             except Exception:
                 pass
 
             return {
                 'ssid': ssid,
-                'ip': ip or 'Unknown',
+                'ip': ip,
                 'signal': signal,
             }
         except subprocess.TimeoutExpired:

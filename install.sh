@@ -689,18 +689,39 @@ ok "Hardware watchdog enabled (15 s timeout, activates after reboot)"
 # [12/14] Sudoers (so the web UI can call nmcli, systemctl, iw)
 # ---------------------------------------------------------------------------
 say "[12/14] Installing sudoers drop-in for $ADSB_USER..."
+# Sudoers drop-in for the web UI.
+#
+# IMPORTANT: sudo does *exact-string* matching on every argv element.
+# A rule for 'systemctl restart adsb-server.service' will NOT match
+# the call 'systemctl restart adsb-server' (no '.service' suffix), and
+# vice-versa.  We therefore install BOTH forms for every action -- so
+# that any code in app.py / adsb_cli.py / future contributions that
+# uses either form will be permitted.  This was the root cause of the
+# v1 'Failed to stop ADS-B server' alert in the web UI.
 cat >/etc/sudoers.d/adsb-wifi-manager <<EOF
 # adsb-wifi-manager -- least-privilege command list for the web UI.
 # Reload with 'sudo visudo -c -f /etc/sudoers.d/adsb-wifi-manager'.
 $ADSB_USER ALL=(root) NOPASSWD: /usr/bin/nmcli
 $ADSB_USER ALL=(root) NOPASSWD: /usr/sbin/iw
 $ADSB_USER ALL=(root) NOPASSWD: /usr/bin/ip
-$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart adsb-server.service
-$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop adsb-server.service
+
+# adsb-server (forwarder) -- both bare and fully-qualified unit names
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start adsb-server
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop adsb-server
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart adsb-server
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl is-active adsb-server
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl status adsb-server
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl show adsb-server
 $ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start adsb-server.service
-$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart adsb-hotspot-watchdog.service
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop adsb-server.service
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart adsb-server.service
 $ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl is-active adsb-server.service
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl status adsb-server.service
 $ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl show adsb-server.service
+
+# adsb-hotspot-watchdog -- restart only, both forms
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart adsb-hotspot-watchdog
+$ADSB_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart adsb-hotspot-watchdog.service
 EOF
 chmod 0440 /etc/sudoers.d/adsb-wifi-manager
 visudo -cf /etc/sudoers.d/adsb-wifi-manager >/dev/null && ok "Sudoers OK"
