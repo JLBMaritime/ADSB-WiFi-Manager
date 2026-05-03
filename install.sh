@@ -137,7 +137,14 @@ apt-get install -y \
     libcap2-bin curl wget git dos2unix \
     avahi-daemon \
     watchdog logrotate \
-    rfkill usbutils
+    rfkill usbutils \
+    dnsutils
+# `dnsutils` provides dig/nslookup/host.  `adsb-cli doctor` uses dig
+# to verify that the per-AP private dnsmasq is correctly redirecting
+# the captive-portal probe domains (captive.apple.com, etc.) to
+# 192.168.4.1.  Without it the doctor's check 7 fails with
+# "[Errno 2] No such file or directory: 'dig'".  It's also a
+# generally useful field-debug tool for any maritime-ops user.
 apt-get remove -y dnsmasq hostapd 2>/dev/null || true
 systemctl disable --now dnsmasq hostapd 2>/dev/null || true
 ok "Packages installed; full dnsmasq + hostapd removed (NM owns the AP now)"

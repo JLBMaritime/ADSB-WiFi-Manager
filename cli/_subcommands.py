@@ -257,46 +257,82 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         print(warn("wlan1 not detected"))
         warned += 1
 
-    # 5. Listening sockets we expect
+    # 5. Listening sockets we expect.
+    #
+    # Architecture (pinned in install.sh):
+    #   :30003  dump1090-fa SBS1     (the forwarder reads this)        FAIL if missing
+    #   :30005  dump1090-fa Beast    (nice-to-have for raw consumers)  WARN
+    #   :8080   lighttpd / aircraft.json + SkyAware                    WARN
+    #   :80     lighttpd / SkyAware UI                                 WARN
+    #   :5000   web manager (waitress) -- canonical port for the UI    FAIL
+    #
+    # Note: :5000 used to be a "fell back to" warning when :80 was the
+    # intended port for the manager.  Since the lighttpd-owns-:80
+    # architecture decision (lighttpd is required because adsb_server.py
+    # in JSON / json_to_sbs1 mode reads /data/aircraft.json from
+    # lighttpd on :8080), the manager's permanent home is :5000 and
+    # :80 belongs to lighttpd.  Both are healthy when bound.
     rc, out = _run(["ss", "-ltn"])
-    needed = {"30003": "dump1090 SBS1", "30005": "dump1090 Beast",
-              "8080": "dump1090 SkyAware", "80": "web UI"}
-    for port, label in needed.items():
+    expected_ports = [
+        # (port, label, severity_if_missing)
+        ("30003", "dump1090 SBS1",            "fail"),
+        ("30005", "dump1090 Beast",           "warn"),
+        ("8080",  "dump1090 SkyAware",        "warn"),
+        ("80",    "lighttpd / SkyAware UI",   "warn"),
+        ("5000",  "web manager (waitress)",   "fail"),
+    ]
+    for port, label, severity in expected_ports:
         if f":{port} " in out or f":{port}\n" in out:
             print(ok(f"port {port} bound ({label})"))
-        elif port == "80":
-            # Acceptable: fell back to 5000.
-            if ":5000 " in out:
-                print(warn("web UI fell back to :5000 (port 80 not bound)"))
-                warned += 1
-            else:
-                print(fail(f"port {port} NOT bound ({label})"))
-                failed += 1
-        else:
-            print(warn(f"port {port} NOT bound ({label}) -- is dump1090-fa running?"))
-            warned += 1
-
-    # 6. /healthz round-trip
-    try:
-        with urllib.request.urlopen("http://127.0.0.1/healthz", timeout=2) as r:
-            body = json.loads(r.read())
-            if r.status == 200 and body.get("status") == "ok":
-                print(ok("GET /healthz -> 200 ok"))
-            else:
-                print(warn(f"GET /healthz -> {r.status} {body}"))
-                warned += 1
-    except Exception:
-        try:
-            urllib.request.urlopen("http://127.0.0.1:5000/healthz", timeout=2)
-            print(warn("/healthz only on :5000 (web UI not on :80)"))
-            warned += 1
-        except Exception as e:
-            print(fail(f"/healthz unreachable: {e}"))
+        elif severity == "fail":
+            print(fail(f"port {port} NOT bound ({label})"))
             failed += 1
+        else:
+            print(warn(f"port {port} NOT bound ({label})"))
+            warned += 1
 
-    # 7. Captive-portal probe redirect verification
-    try:
-        rc, out = _run(["dig", "+short", "+time=2", "+tries=1",
+    # 6. /healthz round-trip.
+    #
+    # Try the canonical port (:5000) first, fall back to :80 only as
+    # a defensive check for someone who manually moved the manager.
+    # Previous version had the order inverted, which produced a
+    # permanent "/healthz only on :5000 (web UI not on :80)" warning
+    # on every healthy install.  :5000 IS the right place now.
+    healthz_ok = False
+    last_err = None
+    for url in ("http://127.0.0.1:5000/healthz", "http://127.0.0.1/healthz"):
+        try:
+            with urllib.request.urlopen(url, timeout=2) as r:
+                body = json.loads(r.read())
+                if r.status == 200 and body.get("status") == "ok":
+                    print(ok(f"GET {url} -> 200 ok"))
+                    healthz_ok = True
+                    break
+                else:
+                    last_err = f"{url} -> {r.status} {body}"
+        except Exception as e:  # noqa: BLE001 -- urlopen surfaces many error types
+            last_err = f"{url}: {e}"
+            continue
+    if not healthz_ok:
+        print(fail(f"/healthz unreachable on :5000 or :80 ({last_err})"))
+        failed += 1
+
+    # 7. Captive-portal probe redirect verification.
+    #
+    # Uses dig from `dnsutils` (added to the apt list in install.sh
+    # step [2/14]).  Older installs may not have dnsutils yet -- in
+    # that case shutil.which() returns None and we print INFO and
+    # move on.  We do the existence check BEFORE invoking _run()
+    # because _run()'s blanket `except Exception` previously swallowed
+    # the FileNotFoundError and produced a confusing
+    # "[Errno 2] No such file or directory: 'dig'" warning text
+    # instead of a clean "skipping" message.
+    dig = shutil.which("dig")
+    if not dig:
+        print(info("`dig` not installed (apt install dnsutils) -- "
+                   "skipping captive-portal DNS check"))
+    else:
+        rc, out = _run([dig, "+short", "+time=2", "+tries=1",
                         "@192.168.4.1", "captive.apple.com"])
         if "192.168.4.1" in out:
             print(ok("dnsmasq redirects captive.apple.com -> 192.168.4.1"))
@@ -304,8 +340,6 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
             print(warn(f"captive.apple.com via 192.168.4.1 didn't return our IP "
                        f"(got: {out.strip()!r}) -- AP DNS may be misconfigured"))
             warned += 1
-    except FileNotFoundError:
-        print(info("`dig` not installed -- skipping captive-portal DNS check"))
 
     # 8. USB-disconnect rate scan (kernel log)
     rc, out = _run(["journalctl", "-k", "--since", "10 min ago", "--no-pager"], timeout=8)
