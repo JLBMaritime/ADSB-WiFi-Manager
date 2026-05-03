@@ -13,7 +13,7 @@ number of TCP endpoints. Ships with:
   — that JSON endpoint is the data path used by `adsb_server.py` in
   its `json` / `json_to_sbs1` output modes, so we must not disable
   lighttpd.
-* a scriptable CLI (`adsb-cli`) with a one-shot `doctor` diagnostic
+* a scriptable CLI (`sudo adsb-cli`) with a one-shot `doctor` diagnostic
 * hardware + software watchdogs that auto-recover from kernel hangs,
   USB-3 dongle dropouts, and Wi-Fi power-save freezes
 
