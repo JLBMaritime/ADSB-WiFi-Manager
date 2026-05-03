@@ -591,11 +591,36 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-# web-manager.service: waitress on port 80, non-root, watchdog ping.
+# web-manager.service: waitress on port 5000, non-root, watchdog ping.
+#
+# CRITICAL: do NOT set NoNewPrivileges=true on this unit.
+# ----------------------------------------------------------------
+# The web manager NEEDS to be able to run sudo at runtime so the
+# unprivileged 'adsb' daemon user can:
+#   - call `nmcli` (scan / connect / disconnect / forget)
+#   - call `systemctl start|stop|restart adsb-server.service`
+# Sudo is a setuid binary; its whole job is to fork+setuid(0).
+# `NoNewPrivileges=true` is a kernel flag that PERMANENTLY (for the
+# lifetime of the process tree) forbids any execve() from raising
+# privileges via setuid.  Setting it here causes EVERY sudo call to
+# fail at the kernel level with the journal line:
+#   "sudo: The 'no new privileges' flag is set, which prevents sudo
+#    from running as root."
+# Symptoms in the UI when this flag is on:
+#   * Wi-Fi scan returns 0 networks (sudo nmcli ... silently rc!=0)
+#   * Saved Networks list is empty
+#   * Dashboard shows "Not Connected" even when wlan0 is associated
+#   * Start/Stop/Restart buttons throw "Failed to <action> ADS-B server"
+#   * Saving any config in the UI does not actually restart the
+#     forwarder
+# All other hardening directives below (ProtectSystem, ProtectHome,
+# ReadWritePaths, PrivateTmp) are kept ON because they don't
+# interfere with sudo's setuid path.
+# ----------------------------------------------------------------
 cat >/etc/systemd/system/web-manager.service <<EOF
 [Unit]
-Description=ADS-B Wi-Fi Manager Web UI (waitress @ :80)
-After=network-online.target
+Description=ADS-B Wi-Fi Manager Web UI (waitress @ :5000)
+After=network-online.target lighttpd.service
 Wants=network-online.target
 
 [Service]
@@ -607,14 +632,11 @@ ExecStart=$INSTALL_DIR/.venv/bin/python3 $INSTALL_DIR/web_interface/app.py
 Restart=always
 RestartSec=10s
 
-# Hardening
-NoNewPrivileges=true
+# Hardening -- but NOT NoNewPrivileges (see fat comment above).
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=$INSTALL_DIR/config $INSTALL_DIR/logs
 PrivateTmp=true
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 # Resource caps
 MemoryMax=300M
