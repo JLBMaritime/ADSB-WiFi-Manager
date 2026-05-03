@@ -350,11 +350,23 @@ fi
 # config/dnsmasq-shared-adsb.conf), which then caused step [7/14] to
 # fail with "cannot stat /opt/.../config/wifi-powersave-off.conf".
 # Whitelist the operator-edited files by exact name instead.
-rsync -a --delete --exclude='.venv' \
-      --exclude='config/adsb_server_config.conf' \
-      --exclude='config/web_config.conf' \
-      --exclude='HOTSPOT_PASSWORD.txt' \
-      --exclude='secret_key' --exclude='logs/*' \
+# rsync filter rules: explicit Protect (P) on operator-runtime files
+# and dirs, anchored to the install root (leading '/').  Previous
+# version used `--exclude='logs/*'` which excluded the *contents* of
+# logs/ from the source view but left --delete trying to delete
+# logs/ from dest -- which fails with "cannot delete non-empty
+# directory: logs" on every re-install (the warning we used to see
+# but couldn't suppress without losing the log files).
+#
+# Filter syntax: 'P /<path>'    protects from --delete
+#                '*** ' suffix  recurses into the dir's children
+rsync -a --delete \
+      --filter='P /.venv/'   --filter='P /.venv/***' \
+      --filter='P /logs/'    --filter='P /logs/***' \
+      --filter='P /config/adsb_server_config.conf' \
+      --filter='P /config/web_config.conf' \
+      --filter='P /HOTSPOT_PASSWORD.txt' \
+      --filter='P /secret_key' \
       "$SOURCE_DIR"/ "$INSTALL_DIR"/
 mkdir -p "$INSTALL_DIR"/{config,logs}
 # CRLF -> LF (Windows-edited files are common)
@@ -561,8 +573,16 @@ Documentation=file://$INSTALL_DIR/README.md
 # Wait for dump1090-fa to actually bind 30003 before we connect to it.
 # Without this the forwarder races dump1090 on boot and spews
 # "Connection refused" until the receiver finishes warming up.
-After=network-online.target dump1090-fa.service
-Wants=dump1090-fa.service network-online.target
+#
+# We also order after lighttpd because adsb_server.py reads
+# /data/aircraft.json from lighttpd:8080 when output_format is
+# 'json' or 'json_to_sbs1' (configurable in
+# config/adsb_server_config.conf).  Wants= is SOFT -- if lighttpd
+# is masked or fails to start the forwarder still comes up, it'll
+# just log a few "connection refused" lines and retry on its own
+# loop.  This is the right defensive ordering, not a hard dep.
+After=network-online.target dump1090-fa.service lighttpd.service
+Wants=dump1090-fa.service network-online.target lighttpd.service
 
 [Service]
 Type=simple

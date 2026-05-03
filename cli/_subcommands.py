@@ -11,6 +11,8 @@ module is purely additive.
 Subcommands:
     show-hotspot   Print the live hotspot SSID + PSK (read from NM)
     rotate-pw      Generate a new 16-char PSK, write to NM and restart AP
+    wifi-status    SSID/IP/signal/link-rate of wlan0 (the uplink)
+    wifi-list      Top-20 nearby Wi-Fi networks visible to wlan0
     health         Hit /healthz and print JSON
     doctor         End-to-end diagnostics for the AP + receiver chain
     update         git pull && re-run install.sh
@@ -153,6 +155,170 @@ def cmd_rotate_pw(_args: argparse.Namespace) -> int:
         print(warn(f"Couldn't update seed file {PSK_SEED_FILE}: {e}"))
     print(ok(f"New PSK active: {new_psk}"))
     print(info("All previously paired devices must FORGET the network and rejoin."))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: wifi-status
+# ---------------------------------------------------------------------------
+# Quick read-only summary of the UPLINK interface (wlan0), NOT the
+# AP (wlan1).  Pure nmcli + /sys reads -- no root required (though
+# 'sudo' makes the output identical and fits the rest of the CLI's
+# muscle memory).
+def cmd_wifi_status(_args: argparse.Namespace) -> int:
+    iface = "wlan0"
+
+    # Active connection on iface, if any
+    rc, out, _ = _nmcli("-t", "-f",
+                        "GENERAL.CONNECTION,GENERAL.STATE,IP4.ADDRESS,IP4.GATEWAY",
+                        "device", "show", iface)
+    if rc != 0:
+        print(fail(f"nmcli device show {iface} failed -- is the interface present?"))
+        return 1
+
+    fields: dict[str, str] = {}
+    for line in out.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            fields[k] = v
+
+    conn  = fields.get("GENERAL.CONNECTION", "") or "<none>"
+    state = fields.get("GENERAL.STATE", "")
+    ip    = fields.get("IP4.ADDRESS[1]", "") or "<none>"
+    gw    = fields.get("IP4.GATEWAY", "") or "<none>"
+
+    # Active SSID + signal % from `nmcli dev wifi list` (only the
+    # IN-USE row, marked with '*' in the first column)
+    ssid_active = ""
+    signal_pct  = ""
+    rate        = ""
+    rc, scan_out, _ = _nmcli("-t",
+                             "-f", "IN-USE,SSID,SIGNAL,RATE",
+                             "device", "wifi", "list", "ifname", iface)
+    if rc == 0:
+        for line in scan_out.splitlines():
+            # nmcli -t escapes ':' inside fields with '\:' so split on
+            # un-escaped colons.  Quick + dirty: rejoin escaped pieces.
+            parts = line.split(":")
+            # heal any escaped colons inside SSID
+            healed: list[str] = []
+            buf = ""
+            for p in parts:
+                if buf:
+                    buf += ":" + p
+                    if not p.endswith("\\"):
+                        healed.append(buf.replace("\\:", ":"))
+                        buf = ""
+                elif p.endswith("\\"):
+                    buf = p[:-1]
+                else:
+                    healed.append(p)
+            if buf:
+                healed.append(buf.replace("\\:", ":"))
+            if len(healed) >= 4 and healed[0].strip() == "*":
+                ssid_active = healed[1]
+                signal_pct  = healed[2]
+                rate        = healed[3]
+                break
+
+    # Driver from /sys (informational)
+    drv_link = Path(f"/sys/class/net/{iface}/device/driver")
+    drv = drv_link.resolve().name if drv_link.exists() else "<unknown>"
+
+    # MAC + operstate
+    try:
+        mac = Path(f"/sys/class/net/{iface}/address").read_text().strip()
+    except Exception:
+        mac = "<unknown>"
+    try:
+        oper = Path(f"/sys/class/net/{iface}/operstate").read_text().strip()
+    except Exception:
+        oper = "<unknown>"
+
+    print(_c("1;36", f"=== {iface} status ==="))
+    print(info(f"Driver       : {drv}"))
+    print(info(f"MAC          : {mac}"))
+    print(info(f"Operstate    : {oper}"))
+    print(info(f"NM state     : {state or '<unknown>'}"))
+    print(info(f"NM connection: {conn}"))
+    print(info(f"SSID (active): {ssid_active or '<not associated>'}"))
+    print(info(f"Signal       : {signal_pct + '%' if signal_pct else '<n/a>'}"))
+    print(info(f"Link rate    : {rate or '<n/a>'}"))
+    print(info(f"IPv4 address : {ip}"))
+    print(info(f"IPv4 gateway : {gw}"))
+
+    if state and "connected" in state.lower():
+        return 0
+    return 2  # not connected -- still informative, but signal failure
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: wifi-list
+# ---------------------------------------------------------------------------
+# Trigger a fresh scan and print the top-20 networks visible to wlan0
+# sorted by signal strength.  The rescan needs root (NM gates it on
+# CAP_NET_ADMIN); without root the cached scan list is shown instead
+# with a one-line note.
+def cmd_wifi_list(_args: argparse.Namespace) -> int:
+    iface = "wlan0"
+
+    if os.geteuid() == 0:
+        # Force a fresh scan -- NM caches scans for ~30 s otherwise.
+        # Ignore failure: even if rescan races a transient state, the
+        # cached scan results below are still useful.
+        _nmcli("device", "wifi", "rescan", "ifname", iface,
+               sudo=True, timeout=15.0)
+    else:
+        print(info("(run with sudo to force a fresh scan; showing cached results)"))
+
+    rc, out, err = _nmcli("-t",
+                          "-f", "IN-USE,SSID,SIGNAL,SECURITY,CHAN,RATE",
+                          "device", "wifi", "list", "ifname", iface,
+                          timeout=20.0)
+    if rc != 0:
+        print(fail(f"nmcli wifi list failed: {err}"))
+        return 1
+
+    # Parse + sort.  Empty SSIDs (hidden networks) are kept and labeled.
+    rows: list[tuple[str, str, int, str, str, str]] = []
+    for line in out.splitlines():
+        # Heal nmcli's '\:' escaping (same as wifi-status)
+        parts = line.split(":")
+        healed: list[str] = []
+        buf = ""
+        for p in parts:
+            if buf:
+                buf += ":" + p
+                if not p.endswith("\\"):
+                    healed.append(buf.replace("\\:", ":"))
+                    buf = ""
+            elif p.endswith("\\"):
+                buf = p[:-1]
+            else:
+                healed.append(p)
+        if buf:
+            healed.append(buf.replace("\\:", ":"))
+        if len(healed) < 6:
+            continue
+        in_use, ssid, sig, sec, chan, rate = healed[0:6]
+        try:
+            sig_n = int(sig) if sig else 0
+        except ValueError:
+            sig_n = 0
+        rows.append((in_use, ssid or "<hidden>", sig_n, sec or "--", chan, rate))
+
+    rows.sort(key=lambda r: r[2], reverse=True)
+    rows = rows[:20]
+
+    # Header
+    print(_c("1;36", f"=== {iface} -- top 20 networks (by signal) ==="))
+    print(f"{'IN-USE':<6} {'SIGNAL':>6} {'CHAN':>4} {'SECURITY':<14} "
+          f"{'RATE':<10} {'SSID'}")
+    print("-" * 76)
+    for in_use, ssid, sig, sec, chan, rate in rows:
+        marker = "*" if in_use == "*" else ""
+        print(f"{marker:<6} {sig:>5}% {chan:>4} {sec:<14} {rate:<10} {ssid}")
+
     return 0
 
 
@@ -402,6 +568,8 @@ def main(argv: list[str]) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("show-hotspot", help="show hotspot SSID + PSK")
     sub.add_parser("rotate-pw",    help="generate a new 16-char hotspot PSK")
+    sub.add_parser("wifi-status",  help="show wlan0 uplink SSID / IP / signal")
+    sub.add_parser("wifi-list",    help="scan + list top-20 visible networks on wlan0")
     sub.add_parser("health",       help="hit /healthz and print result")
     sub.add_parser("doctor",       help="end-to-end diagnostics")
     sub.add_parser("update",       help="git pull && re-run install.sh")
@@ -410,6 +578,8 @@ def main(argv: list[str]) -> int:
     handlers = {
         "show-hotspot": cmd_show_hotspot,
         "rotate-pw":    cmd_rotate_pw,
+        "wifi-status":  cmd_wifi_status,
+        "wifi-list":    cmd_wifi_list,
         "health":       cmd_health,
         "doctor":       cmd_doctor,
         "update":       cmd_update,
