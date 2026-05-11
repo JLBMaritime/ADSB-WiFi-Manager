@@ -668,7 +668,6 @@ nmcli connection modify adsb-hotspot \
     802-11-wireless-security.psk "$HOTSPOT_PSK" \
     ipv4.method shared \
     ipv4.addresses 192.168.4.1/24 \
-    ipv4.shared-dhcp-lease-time 3600 \
     ipv6.method ignore \
     connection.autoconnect yes \
     connection.autoconnect-retries 0 \
@@ -681,30 +680,40 @@ nmcli connection modify adsb-hotspot \
 #   * autoconnect-priority 100 -> win every autoconnect race against
 #     any future second profile bound to the same MAC (e.g. an STA
 #     test profile).
-#   * ipv4.shared-dhcp-lease-time 3600 -> 1-hour DHCP leases.  Phones
-#     re-run captive-portal probes on every renewal; long leases drop
-#     the probe-storm rate dramatically and stop the "Unable to join
-#     this network" Apple-pattern when the AP-side dnsmasq has a bad
-#     moment.  IMPORTANT -- do NOT use `ipv4.dhcp-leasetime`: that's
-#     the CLIENT-side renewal knob and NM rejects it as invalid when
-#     method=shared.
+# `ipv4.shared-dhcp-lease-time 3600` is applied in the OPTIONAL block
+# below -- the property only exists on NM 1.44+ (Trixie).  Bookworm's
+# NM 1.42 rejects it as an unknown property and aborts `nmcli modify`,
+# which is why we kept it out of this required block.  NM's default
+# lease on `method=shared` is already ~1 h, so the practical effect
+# on Bookworm is identical.
 
 # OPTIONAL properties: best-effort, log on failure.
-# - 802-11-wireless.powersave    : silently ignored on older NM
-# - 802-11-wireless-security.pmf : NM 1.42 accepts the string forms
-#                                  (disable|optional|required) reliably;
-#                                  the integer alias `1` was rejected
-#                                  on at least one Bookworm build.
-# - connection.zone              : firewalld zone name -- RPi OS Lite
-#                                  does NOT install firewalld, so any
-#                                  value other than '' is rejected.
-#                                  We deliberately don't set this; per-
-#                                  AP isolation is already provided by
-#                                  ipv4.method=shared.
+# - 802-11-wireless.powersave        : silently ignored on older NM
+# - 802-11-wireless-security.pmf     : NM 1.42 accepts the string forms
+#                                      (disable|optional|required) reliably;
+#                                      the integer alias `1` was rejected
+#                                      on at least one Bookworm build.
+# - ipv4.shared-dhcp-lease-time      : Trixie-only (NM 1.44+).  On
+#                                      Bookworm NM 1.42 this property
+#                                      doesn't exist yet and `nmcli
+#                                      modify` aborts -- so we apply it
+#                                      best-effort here, not in the
+#                                      required block.  NM's default
+#                                      lease on method=shared is ~1 h
+#                                      anyway, so on Bookworm we lose
+#                                      nothing meaningful.
+# - connection.zone                  : firewalld zone name -- RPi OS Lite
+#                                      does NOT install firewalld, so any
+#                                      value other than '' is rejected.
+#                                      We deliberately don't set this; per-
+#                                      AP isolation is already provided by
+#                                      ipv4.method=shared.
 nmcli connection modify adsb-hotspot 802-11-wireless.powersave 2 2>/dev/null \
     || warn "could not set 802-11-wireless.powersave=2 (NM too old?)"
 nmcli connection modify adsb-hotspot 802-11-wireless-security.pmf disable 2>/dev/null \
     || warn "could not set 802-11-wireless-security.pmf=disable (NM too old?)"
+nmcli connection modify adsb-hotspot ipv4.shared-dhcp-lease-time 3600 2>/dev/null \
+    || warn "could not set ipv4.shared-dhcp-lease-time=3600 (NM <1.44 -- Bookworm uses its 1 h default anyway)"
 
 # Bring it up and verify activation (poll up to 20 s).
 nmcli connection up adsb-hotspot >/dev/null || true
