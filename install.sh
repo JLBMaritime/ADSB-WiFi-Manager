@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ################################################################################
-# ADS-B Wi-Fi Manager - Installer v2 (NetworkManager-shared AP, 5 GHz)
+# ADS-B Wi-Fi Manager - Installer v2 (NetworkManager-shared AP, 2.4 GHz)
 # JLBMaritime - Raspberry Pi 4B + USB Wi-Fi dongle on wlan1
 #
 # Major changes vs. v1:
@@ -9,9 +9,13 @@
 #     `ipv4.method=shared` -- no more dual-stack races, no more
 #     "interface not coming up" because NM and ifupdown both think
 #     they own wlan1.  This matches AIS-WiFi-Manager exactly.
-#   * 5 GHz channel 36 (UNII-1, non-DFS), WPA2-only CCMP -- iPhones
-#     and Android 14+ refused to associate with the old WPA1+WPA2
-#     mixed/TKIP config.
+#   * 2.4 GHz channel 6, WPA2-only CCMP (v2.1: ported from AIS).
+#     Original v2 ran 5 GHz ch 36 but mt76x2u / rt2800usb AP-mode on
+#     5 GHz is a dongle-firmware coin-flip; 2.4 GHz ch 6 works on
+#     every chipset and matches the AIS-WiFi-Manager profile that's
+#     been rock-solid in the field.  iPhones and Android 14+ associate
+#     fine on either band -- WPA2-only CCMP is the actual fix for the
+#     "old WPA1+WPA2 mixed/TKIP config" join problem.
 #   * Random 16-char alphanumeric PSK at install time (was hard-coded
 #     `Admin123` in git).
 #   * Captive-portal probe redirects so phones see the AP as a normal
@@ -67,6 +71,75 @@ banner_red() {
     printf "${RST}"
 }
 
+# ---------------------------------------------------------------------------
+# validate_nm_conf <file>
+# ---------------------------------------------------------------------------
+# Line-by-line validate a NetworkManager keyfile (anything in
+# /etc/NetworkManager/conf.d/).  glib's keyfile parser (used by NM 1.42+
+# on Bookworm, NM 1.52 on Trixie) is strict: only blank lines,
+# `[group]` headers, `#` comments, and `key = value` lines are accepted.
+# A single ';'-style comment, a typo'd key, or a stray semicolon is
+# enough to make NetworkManager crash-loop on boot and take wlan0/wlan1
+# (and your SSH session) down with it.
+#
+# This is a port of AIS-WiFi-Manager's validator.  Catches strictly more
+# than the previous grep-for-';' check we had inline in step [1/14].
+# Returns 0 on success, prints offending line(s) and returns 1 on failure.
+validate_nm_conf() {
+    local f="$1"
+    local n=0 bad=0
+    if [[ ! -f "$f" ]]; then
+        return 0  # nothing to validate
+    fi
+    while IFS= read -r line; do
+        n=$((n + 1))
+        # strip CR (CRLF files) and leading whitespace
+        local stripped="${line%$'\r'}"
+        stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+        case "$stripped" in
+            ''|'#'*|'['*) ;;            # blank / comment / group header
+            *=*)          ;;            # key = value
+            *)
+                fail "      INVALID line $n in $f: $line"
+                bad=$((bad + 1))
+                ;;
+        esac
+    done < "$f"
+    if [[ $bad -gt 0 ]]; then
+        fail "      $f has $bad invalid line(s) -- refusing to install."
+        fail "      (NM rejects ';' comments and any line that isn't"
+        fail "       blank / [group] / '#' comment / key=value.)"
+        return 1
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# nm_reload
+# ---------------------------------------------------------------------------
+# Reload /etc/NetworkManager/conf.d/* WITHOUT tearing down active radio
+# links (so an SSH session over wlan0 stays alive).  Falls back to a
+# hard restart only if reload fails.  Crucially, it asserts NM is
+# is-active afterwards and aborts the install with a journal tail if
+# not -- which is the regression guard for the ';'-comment / unknown-key
+# class of bug.
+nm_reload() {
+    if nmcli general reload >/dev/null 2>&1; then
+        :
+    else
+        systemctl restart NetworkManager
+    fi
+    sleep 2
+    if ! systemctl is-active --quiet NetworkManager; then
+        fail "      NetworkManager is not active after reload!"
+        echo  "      Last 30 NM journal lines:"
+        journalctl -u NetworkManager -n 30 --no-pager | tail -n 30 || true
+        fail "      Refusing to continue -- would leave Pi unbootable."
+        return 1
+    fi
+    return 0
+}
+
 LOG=/var/log/adsb-install.log
 trap 'fail "install.sh failed at line $LINENO. See $LOG for the full transcript."' ERR
 exec > >(tee -a "$LOG") 2>&1
@@ -101,16 +174,43 @@ ok  "Operator user: $ACTUAL_USER (web UI service runs as $ADSB_USER)"
 [[ $WITH_TAILSCALE -eq 1 ]] && ok "Tailscale: will install"
 
 # ---------------------------------------------------------------------------
+# SSH bounce warning
+# ---------------------------------------------------------------------------
+# Step [7/14] reloads NetworkManager, and step [8/14] tears down and
+# re-creates the AP profile on wlan1.  Neither *should* disturb wlan0
+# (the user's uplink), but `apt-get install network-manager` in step
+# [2/14] can briefly bounce wlan0 on some images.  If the operator is
+# SSH'd in over wlan0, that bounce kills the SSH session and the rest
+# of the install runs blind.
+#
+# Mitigation: print a clear 5-second warning, give them a chance to
+# Ctrl-C and re-launch under tmux/screen.  Everything is teed to
+# /var/log/adsb-install.log so reconnecting after a bounce loses
+# nothing.
+if [[ -n "${SSH_CONNECTION:-}" ]]; then
+    echo
+    printf "${YLW}NOTICE: you are running this installer over SSH (%s).${RST}\n" \
+        "${SSH_CONNECTION}"
+    printf "${YLW}        Wi-Fi may briefly bounce; if your session drops, reconnect${RST}\n"
+    printf "${YLW}        after ~30 s and follow progress with:${RST}\n"
+    printf "${YLW}            sudo tail -f %s${RST}\n" "$LOG"
+    printf "${YLW}        For zero-risk: run inside ${GRN}tmux${YLW} or ${GRN}screen${YLW},${RST}\n"
+    printf "${YLW}        or connect over the management AP at ${GRN}192.168.4.1${YLW}.${RST}\n"
+    printf "${YLW}        Continuing in 5 s -- Ctrl-C to abort.${RST}\n"
+    sleep 5
+fi
+
+# ---------------------------------------------------------------------------
 # [1/14] Validate NM drop-ins (the ';'-comment trap)
 # ---------------------------------------------------------------------------
-say "[1/14] Validating /etc/NetworkManager/conf.d/*.conf for the ';'-comment trap..."
+say "[1/14] Validating /etc/NetworkManager/conf.d/*.conf (full keyfile syntax check)..."
 shopt -s nullglob
 bad=0
 for f in /etc/NetworkManager/conf.d/*.conf; do
-    if grep -Pq '^[[:space:]]*;' "$f"; then
-        fail "  $f contains ';'-style comments -- glib's keyfile parser on"
-        fail "  Bookworm rejects them and NetworkManager will refuse to start."
-        fail "  Fix:  sudo sed -i 's/^[[:space:]]*;/#/' $f"
+    # validate_nm_conf catches more than just ';' comments: also rejects
+    # unknown-key lines, malformed key=value, stray semicolons inside
+    # values, etc.  Ported from AIS-WiFi-Manager.
+    if ! validate_nm_conf "$f"; then
         bad=1
     fi
 done
@@ -119,7 +219,7 @@ if [[ $bad -eq 1 ]]; then
     fail "Aborting before we make things worse.  Fix the file(s) above and re-run."
     exit 2
 fi
-ok "No ';' comments found"
+ok "All NM conf.d files pass strict keyfile validation"
 
 # ---------------------------------------------------------------------------
 # [2/14] System packages (no apt upgrade -- explicit deps only)
@@ -147,7 +247,25 @@ apt-get install -y \
 # generally useful field-debug tool for any maritime-ops user.
 apt-get remove -y dnsmasq hostapd 2>/dev/null || true
 systemctl disable --now dnsmasq hostapd 2>/dev/null || true
-ok "Packages installed; full dnsmasq + hostapd removed (NM owns the AP now)"
+
+# Pin the FULL `dnsmasq` package to "do not install" so a future
+# `apt full-upgrade`, or somebody manually `apt install`-ing pi-hole /
+# unbound / etc., can't drag it back in and steal :53/:67 from NM's
+# per-AP private dnsmasq.  `apt-mark hold` is the standard Debian way
+# and is reversible with `apt-mark unhold dnsmasq`.  Errors tolerated
+# -- on a brand-new image the package may not even be known to apt
+# yet (post-remove cache state).
+apt-mark hold dnsmasq 2>/dev/null || true
+
+# Don't let *-wait-online services hold up boot for minutes if any
+# interface (tailscale0 in particular) is slow to come up.  Our
+# services supervise their own networking -- the boot path doesn't
+# need to block.  Disabling these also prevents the box being
+# unreachable for 1.5 min after a USB blip during install.
+systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
+systemctl mask    systemd-networkd-wait-online.service 2>/dev/null || true
+
+ok "Packages installed; full dnsmasq + hostapd removed + held; wait-online disabled"
 
 # ---------------------------------------------------------------------------
 # [3/14] dump1090-fa (the ADS-B receiver) + RTL-SDR udev rule + DVB blacklist
@@ -427,18 +545,30 @@ mkdir -p /etc/NetworkManager/dnsmasq-shared.d
 install -m 0644 "$SOURCE_DIR/config/dnsmasq-shared-adsb.conf" \
     /etc/NetworkManager/dnsmasq-shared.d/00-adsb-upstream.conf
 
-# Final ';'-comment regression check (we just installed two files)
-if grep -lP '^[[:space:]]*;' /etc/NetworkManager/conf.d/*.conf >/dev/null 2>&1; then
-    fail "Just-installed NM conf.d files contain ';' comments.  This is a bug in the project."
-    exit 3
-fi
-systemctl is-active NetworkManager >/dev/null && nmcli general reload || systemctl restart NetworkManager
-ok "NetworkManager reloaded"
+# Final keyfile-syntax regression check on EVERYTHING we just installed
+# (including any third-party drop-ins that were already there, e.g. a
+# previous Tailscale).  We don't auto-delete -- refuse to continue and
+# let a human decide.  This catches strictly more than just ';' comments
+# (typo'd keys, malformed lines, etc.) since the validator was ported
+# from AIS in the helpers block at the top of this file.
+for f in /etc/NetworkManager/conf.d/*.conf; do
+    [[ -f "$f" ]] || continue
+    if ! validate_nm_conf "$f"; then
+        fail "Just-installed NM conf.d files have keyfile syntax errors -- bug in project."
+        exit 3
+    fi
+done
+# Reload via the helper, which falls back to restart only if needed
+# and asserts NM is is-active afterwards (with a journal tail on
+# failure).  This is the regression guard for the ';'-comment /
+# unknown-key trap we used to hit only at next reboot.
+nm_reload || exit 1
+ok "NetworkManager reloaded (NM is is-active; conf.d files validated)"
 
 # ---------------------------------------------------------------------------
-# [8/14] Materialise the AP profile on wlan1 (5 GHz, WPA2-CCMP)
+# [8/14] Materialise the AP profile on wlan1 (2.4 GHz ch 6, WPA2-CCMP)
 # ---------------------------------------------------------------------------
-say "[8/14] Creating NetworkManager profile 'adsb-hotspot' on wlan1 (5 GHz, ch 36)..."
+say "[8/14] Creating NetworkManager profile 'adsb-hotspot' on wlan1 (2.4 GHz, ch 6)..."
 
 # Generate a fresh random PSK on every install.  This file is the
 # install-time SEED only; the source of truth for the live PSK is the
@@ -476,17 +606,61 @@ COUNTRY=$(awk -F= '/^REGDOMAIN=/{gsub(/"/,"",$2); print $2}' /etc/default/crda 2
 COUNTRY=${COUNTRY:-GB}
 iw reg set "$COUNTRY" 2>/dev/null || true
 
+# wlan1 MAC pin.  Cheap USB dongles can re-enumerate as wlan2/wlan3
+# across USB-port changes, hub resets, suspend/resume, or even a cable
+# jiggle.  Binding the profile to the dongle's MAC instead of the
+# interface name means the AP profile follows the radio, not the
+# kernel-assigned name.  Failure to read the MAC is fatal -- we won't
+# bring up a misbound AP.  Ported from AIS.
+if [[ ! -r /sys/class/net/wlan1/address ]]; then
+    fail "Cannot read /sys/class/net/wlan1/address -- is the USB dongle plugged in?"
+    fail "Plug it in (BLACK / USB-2 port) and re-run sudo ./install.sh"
+    exit 4
+fi
+WLAN1_MAC="$(cat /sys/class/net/wlan1/address)"
+ok "wlan1 MAC: $WLAN1_MAC (profile will be MAC-pinned, not iface-name-pinned)"
+
 # Recreate the profile from scratch so re-installs are idempotent.
 nmcli connection delete adsb-hotspot 2>/dev/null || true
 nmcli connection add type wifi ifname wlan1 con-name adsb-hotspot \
     autoconnect yes \
     ssid "$SSID"
+
+# ============================================================================
+# AP profile properties -- full AIS port (2.4 GHz, MAC-pinned, retries 0,
+# 1 h DHCP lease).  See top-of-file changelog for the rationale on each.
+# ============================================================================
 # REQUIRED properties: failure here MUST abort -- without them the
 # AP would either fail to start or accept clients in an insecure mode.
+#
+# Why band=bg / channel=6 (port from AIS):
+#   2.4 GHz works on EVERY USB AP-capable chipset.  5 GHz AP mode on
+#   mt76x2u / mt76x0u / rt2800usb-class dongles is a dongle-firmware
+#   coin-flip and depends on the regulatory domain (DFS channels
+#   require radar-detection support that USB drivers don't have).
+#   AIS-WiFi-Manager runs 2.4 GHz ch 6 in the field with rock-solid
+#   stability; we copy that exactly.  The throughput loss vs 5 GHz
+#   (~150 Mbps -> ~50 Mbps) is irrelevant for shifting config UI.
+#
+# Why ipv6.method=ignore (not disabled):
+#   'disabled' instructs NM to refuse activation if any IPv6 RA / link-
+#   local config is somehow forced on the iface (e.g. by a kernel patch
+#   or a static RA from a neighbouring router).  'ignore' is softer --
+#   NM simply doesn't configure v6 itself.  AIS uses 'ignore' and has
+#   not regretted it.
+#
+# Why MAC pin via 802-11-wireless.mac-address:
+#   See WLAN1_MAC block above.  Follows the radio, not the iface name.
+#
+# Why explicit WPA2-only (proto rsn, pairwise ccmp, group ccmp):
+#   ADS-B-specific hardening that we deliberately KEEP from v2: blocks
+#   ancient WPA1+TKIP fallback that AIS still allows for max compat.
+#   Modern phones prefer WPA2-only anyway.
 nmcli connection modify adsb-hotspot \
+    802-11-wireless.mac-address "$WLAN1_MAC" \
     802-11-wireless.mode ap \
-    802-11-wireless.band a \
-    802-11-wireless.channel 36 \
+    802-11-wireless.band bg \
+    802-11-wireless.channel 6 \
     802-11-wireless-security.key-mgmt wpa-psk \
     802-11-wireless-security.proto rsn \
     802-11-wireless-security.pairwise ccmp \
@@ -494,8 +668,26 @@ nmcli connection modify adsb-hotspot \
     802-11-wireless-security.psk "$HOTSPOT_PSK" \
     ipv4.method shared \
     ipv4.addresses 192.168.4.1/24 \
-    ipv6.method disabled \
+    ipv4.shared-dhcp-lease-time 3600 \
+    ipv6.method ignore \
+    connection.autoconnect yes \
+    connection.autoconnect-retries 0 \
     connection.autoconnect-priority 100
+# Notes on the autoconnect hardening (port from AIS):
+#   * autoconnect-retries 0  -> NM never gives up.  Default is 4, after
+#     which NM gives up on autoconnect for the rest of the boot session
+#     and leaves wlan1 idle.  Combined with mt76x2u boot-flap behaviour
+#     this is the leading cause of "AP never came back after reboot".
+#   * autoconnect-priority 100 -> win every autoconnect race against
+#     any future second profile bound to the same MAC (e.g. an STA
+#     test profile).
+#   * ipv4.shared-dhcp-lease-time 3600 -> 1-hour DHCP leases.  Phones
+#     re-run captive-portal probes on every renewal; long leases drop
+#     the probe-storm rate dramatically and stop the "Unable to join
+#     this network" Apple-pattern when the AP-side dnsmasq has a bad
+#     moment.  IMPORTANT -- do NOT use `ipv4.dhcp-leasetime`: that's
+#     the CLIENT-side renewal knob and NM rejects it as invalid when
+#     method=shared.
 
 # OPTIONAL properties: best-effort, log on failure.
 # - 802-11-wireless.powersave    : silently ignored on older NM
@@ -503,7 +695,6 @@ nmcli connection modify adsb-hotspot \
 #                                  (disable|optional|required) reliably;
 #                                  the integer alias `1` was rejected
 #                                  on at least one Bookworm build.
-# - ipv4.shared-dhcp-lease-time  : optional, NM picks a sane default
 # - connection.zone              : firewalld zone name -- RPi OS Lite
 #                                  does NOT install firewalld, so any
 #                                  value other than '' is rejected.
@@ -514,8 +705,6 @@ nmcli connection modify adsb-hotspot 802-11-wireless.powersave 2 2>/dev/null \
     || warn "could not set 802-11-wireless.powersave=2 (NM too old?)"
 nmcli connection modify adsb-hotspot 802-11-wireless-security.pmf disable 2>/dev/null \
     || warn "could not set 802-11-wireless-security.pmf=disable (NM too old?)"
-nmcli connection modify adsb-hotspot ipv4.shared-dhcp-lease-time 3600 2>/dev/null \
-    || true
 
 # Bring it up and verify activation (poll up to 20 s).
 nmcli connection up adsb-hotspot >/dev/null || true
@@ -530,11 +719,12 @@ if [[ "$state" != "activated" ]]; then
     fail "Common causes:"
     fail "  * wlan1 doesn't exist (USB dongle not detected) -- check 'iw dev'"
     fail "  * Dongle on USB-3 with mt76x2u driver -- move to USB-2 (see [4/14])"
-    fail "  * Country code (\$COUNTRY=$COUNTRY) doesn't permit channel 36 outdoors"
+    fail "  * USB dongle does not support AP mode (check 'iw list' for '* AP')"
+    fail "  * Country code (\$COUNTRY=$COUNTRY) blocking 2.4 GHz ch 6 (extremely rare)"
     journalctl -u NetworkManager --no-pager -n 30 || true
     exit 4
 fi
-ok "AP 'JLBMaritime-ADSB' is up on wlan1, 5 GHz channel 36, WPA2-CCMP"
+ok "AP 'JLBMaritime-ADSB' is up on wlan1, 2.4 GHz channel 6, WPA2-CCMP (MAC-pinned)"
 
 # ---------------------------------------------------------------------------
 # [9/14] Hostname + mDNS
@@ -857,7 +1047,7 @@ cat <<EOF
     output_format is 'json' or 'json_to_sbs1' -- so lighttpd is
     REQUIRED, not optional, and our web manager runs on :5000.
 
-  Hotspot SSID:            JLBMaritime-ADSB    (5 GHz, channel 36, WPA2-CCMP)
+  Hotspot SSID:            JLBMaritime-ADSB    (2.4 GHz, channel 6, WPA2-CCMP)
   Hotspot PSK:             $(cat "$PSK_FILE")
                            ^^ also stored at: $PSK_FILE
                            reveal at any time:  sudo adsb-cli show-hotspot

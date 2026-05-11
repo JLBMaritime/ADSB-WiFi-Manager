@@ -9,15 +9,37 @@
 #     and adsb-hotspot can race-lose without this)
 #   * any kernel-side RF kill / regulatory-domain bounce
 #   * suspend/resume on a USB power blip
+#
+# Why a separate unit?
+#   * Isolation: a wedged supervisor must not be able to kill the web
+#     service or vice-versa.  Independent units, independent restart
+#     domains, independent journal streams
+#     (`journalctl -u adsb-hotspot-watchdog`).
+#   * Lifecycle: the watchdog must keep running even if the web
+#     manager is stopped for maintenance (`systemctl stop web-manager`);
+#     an operator should still be able to reach the AP at 192.168.4.1
+#     to recover.
+#
+# IMPORTANT -- we deliberately do NOT use `PartOf=NetworkManager.service`.
+# `PartOf=` makes systemd stop *this* unit whenever NetworkManager is
+# stopped, which is exactly backwards: the moment NM restarts is the
+# moment the AP is most likely to need the watchdog.  Ported from AIS,
+# which dropped PartOf for exactly this reason after seeing watchdogs
+# die alongside NM during the install path.
 Description=ADS-B Hotspot watchdog (auto-revives the AP on wlan1)
 Documentation=man:NetworkManager(8)
 After=NetworkManager.service network-online.target
 Wants=NetworkManager.service
-PartOf=NetworkManager.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -u /opt/adsb-wifi-manager/adsb_server/_hotspot_watchdog.py
+# Use the venv python so the watchdog and the rest of the project
+# always share an interpreter version.  The watchdog itself is
+# stdlib-only (no third-party deps -- precisely so PEP 668 can't
+# break it), so /usr/bin/python3 also works, but using the venv is
+# consistent with adsb-server.service / web-manager.service.  Matches
+# AIS-WiFi-Manager's ais-hotspot-watchdog.service exactly.
+ExecStart=/opt/adsb-wifi-manager/.venv/bin/python3 -u /opt/adsb-wifi-manager/adsb_server/_hotspot_watchdog.py
 Restart=always
 RestartSec=10s
 StartLimitBurst=10
@@ -35,9 +57,18 @@ ProtectControlGroups=true
 RestrictNamespaces=true
 LockPersonality=true
 RestrictRealtime=true
+# Refuse mmap(PROT_WRITE|PROT_EXEC) anywhere in the address space.
+# The watchdog has no JIT, no ctypes, nothing that legitimately
+# needs W^X violations -- this is a cheap kernel-enforced guard
+# against a future exploit that drops shellcode.  Ported from AIS.
+MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 # Allow networking + the netlink socket nmcli speaks over.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=adsb-hotspot-watchdog
 
 [Install]
 WantedBy=multi-user.target
