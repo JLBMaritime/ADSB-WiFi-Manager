@@ -8,22 +8,26 @@ the worst case at every stage below is a down *feed*, never a lost Pi.
 
 All local tests in `wsl_test_matrix.sh` must pass before starting.
 
-## Stage 1 — code only (unit file unchanged)
+## Stage 1 — code only, via git pull (unit file unchanged)
 
-The new code is fully compatible with the old `Type=simple` unit
-(`_sd_notify` no-ops when `NOTIFY_SOCKET` is unset).
+`/opt/adsb-wifi-manager` is a git checkout and a `git pull` cannot touch
+`/etc/systemd/system/`, so pulling main deploys the code while leaving the
+old `Type=simple` unit in place — which the new code is fully compatible
+with (`_sd_notify` no-ops when `NOTIFY_SOCKET` is unset).
 
 ```bash
 ssh <pi>
-sudo cp /opt/adsb-wifi-manager/adsb_server/adsb_server.py \
-        /opt/adsb-wifi-manager/adsb_server/adsb_server.py.bak
-# transfer the new adsb_server.py (scp/sftp), then:
-sudo cp ~/adsb_server.py /opt/adsb-wifi-manager/adsb_server/adsb_server.py
+cd /opt/adsb-wifi-manager
+sudo git rev-parse HEAD          # note this hash for rollback
+sudo git pull --ff-only
 sudo systemctl restart adsb-server
 journalctl -u adsb-server -f     # expect normal startup + data flow
 ```
 
-Rollback: `sudo cp .../adsb_server.py.bak .../adsb_server.py && sudo systemctl restart adsb-server`
+Rollback: `sudo git reset --hard <old-hash> && sudo systemctl restart adsb-server`
+
+Do NOT run `sudo adsb-cli update` for this — it re-runs `install.sh`
+(see above). Plain `git pull` + restart only.
 
 **Soak ≥ 24 h** before Stage 2. What Stage 1 already fixes: TCP keepalive
 (half-open source death self-heals in ~160 s), the 300 s stale-source
@@ -47,9 +51,7 @@ Rollback: revert the three lines, `daemon-reload`, restart.
 
 ## Afterwards
 
-- `sudo git -C /opt/adsb-wifi-manager pull --ff-only` to sync the tree with
-  the committed fix (no scripts executed). Future fresh installs get the
-  new unit from `install.sh` automatically.
+- Future fresh installs get the new unit from `install.sh` automatically.
 - Optional on-Pi confidence checks (risk only the feed): black-hole test
   (`iptables -A INPUT -p tcp --sport 30003 -j DROP` + restart dump1090-fa,
   expect recovery within ~3 min, then remove the rule) and watchdog test
