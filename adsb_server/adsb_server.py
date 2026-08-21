@@ -44,7 +44,14 @@ class ADSBServer:
         self.reconnection_threads = set()  # Track reconnection threads
         self.max_reconnect_threads = 5  # Limit concurrent reconnections
         self.socket_timeout = 30  # 30 second socket timeout
+        self.endpoint_timeout = 5  # Endpoint connect/send timeout (keeps main loop responsive)
+        self.source_stale_after = 300  # Reconnect if no SBS1 data for this long (quiet airspace is normal)
         self.last_resource_check = time.time()
+
+        # Liveness heartbeat: proves the main loop is iterating (not that data
+        # flows). Used to gate the systemd watchdog ping.
+        self.last_heartbeat = time.time()
+        self.heartbeat_stale_after = 75  # > worst legitimate iteration gap (~55s)
         
         # Setup logging
         self.setup_logging()
@@ -146,6 +153,10 @@ class ADSBServer:
             # Load altitude filter settings
             self.altitude_filter_enabled = self.config.getboolean('Filter', 'altitude_filter_enabled', fallback=False)
             self.max_altitude = self.config.getint('Filter', 'max_altitude', fallback=10000)
+
+            # Stale-source backstop threshold (seconds without SBS1 data before
+            # a precautionary reconnect; SBS1 is silent with no aircraft in range)
+            self.source_stale_after = self.config.getint('Dump1090', 'source_stale_after', fallback=300)
                 
             # Load endpoints - properly clean up old ones
             old_endpoints = {f"{ep['ip']}:{ep['port']}": ep for ep in self.endpoints}
@@ -165,14 +176,19 @@ class ADSBServer:
                             'name': name,
                             'ip': ip,
                             'port': port,
-                            'socket': old_endpoints[key]['socket']
+                            'socket': old_endpoints[key]['socket'],
+                            'backoff': old_endpoints[key].get('backoff', 1.0),
+                            'next_retry_at': old_endpoints[key].get('next_retry_at', 0)
                         })
                     else:
+                        old_ep = old_endpoints.get(key, {})
                         new_endpoints.append({
                             'name': name,
                             'ip': ip,
                             'port': port,
-                            'socket': None
+                            'socket': None,
+                            'backoff': old_ep.get('backoff', 1.0),
+                            'next_retry_at': old_ep.get('next_retry_at', 0)
                         })
             
             # Close sockets for removed endpoints
@@ -215,14 +231,34 @@ class ADSBServer:
         with open(self.config_file, 'w') as f:
             self.config.write(f)
             
+    def tune_socket(self, sock):
+        """Enable TCP keepalive so a half-open peer eventually errors out.
+        Idle 60s, then probes every 20s, 5 failures => dead peer detected in
+        ~160s and recv() raises instead of waiting forever."""
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            for name, val in (("TCP_KEEPIDLE", 60),
+                              ("TCP_KEEPINTVL", 20),
+                              ("TCP_KEEPCNT", 5)):
+                opt = getattr(socket, name, None)  # Linux-only constants
+                if opt is not None:
+                    try:
+                        sock.setsockopt(socket.IPPROTO_TCP, opt, val)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
     def connect_to_dump1090(self):
         """Connect to dump1090-fa SBS1 port with timeout"""
         host = self.config.get('Dump1090', 'host', fallback='127.0.0.1')
         port = self.config.getint('Dump1090', 'sbs1_port', fallback=30003)
-        
+
         try:
             self.dump1090_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.dump1090_socket.settimeout(self.socket_timeout)  # Set timeout
+            self.tune_socket(self.dump1090_socket)
             self.dump1090_socket.connect((host, port))
             self.logger.info(f"Connected to dump1090-fa SBS1 at {host}:{port}")
             return True
@@ -295,20 +331,30 @@ class ADSBServer:
             self.logger.error(f"JSON→SBS1 conversion error: {e}")
             return None
             
+    def endpoint_backoff_failure(self, endpoint):
+        """Record a failed endpoint attempt: exponential backoff 1->30s"""
+        backoff = min(endpoint.get('backoff', 1.0) * 2, 30.0)
+        endpoint['backoff'] = backoff
+        endpoint['next_retry_at'] = time.time() + backoff
+
     def connect_to_endpoints(self):
         """Connect to all configured endpoints with timeout"""
         for endpoint in self.endpoints:
-            if not endpoint.get('socket'):
+            if not endpoint.get('socket') and time.time() >= endpoint.get('next_retry_at', 0):
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(self.socket_timeout)  # Set timeout
+                    sock.settimeout(self.endpoint_timeout)  # Set timeout
+                    self.tune_socket(sock)
                     sock.connect((endpoint['ip'], endpoint['port']))
                     endpoint['socket'] = sock
+                    endpoint['backoff'] = 1.0
+                    endpoint['next_retry_at'] = 0
                     self.logger.info(f"Connected to endpoint {endpoint['ip']}:{endpoint['port']}")
                 except Exception as e:
                     self.logger.warning(f"Failed to connect to {endpoint['ip']}:{endpoint['port']}: {e}")
                     endpoint['socket'] = None
-                
+                    self.endpoint_backoff_failure(endpoint)
+
     def reconnect_endpoint(self, endpoint):
         """Attempt to reconnect to a failed endpoint"""
         try:
@@ -319,17 +365,21 @@ class ADSBServer:
                 except:
                     pass
                 endpoint['socket'] = None
-                    
+
             # Create new socket with timeout
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(self.socket_timeout)
+            sock.settimeout(self.endpoint_timeout)
+            self.tune_socket(sock)
             sock.connect((endpoint['ip'], endpoint['port']))
             endpoint['socket'] = sock
+            endpoint['backoff'] = 1.0
+            endpoint['next_retry_at'] = 0
             self.logger.info(f"Reconnected to endpoint {endpoint['ip']}:{endpoint['port']}")
             return True
         except Exception as e:
             self.logger.debug(f"Reconnect failed for {endpoint['ip']}:{endpoint['port']}: {e}")
             endpoint['socket'] = None
+            self.endpoint_backoff_failure(endpoint)
             return False
         finally:
             # Remove this thread from tracking
@@ -371,11 +421,13 @@ class ADSBServer:
     def forward_message(self, message):
         """Forward message to all connected endpoints"""
         message_bytes = message.encode('utf-8')
-        
+
         for endpoint in self.endpoints:
             if endpoint.get('socket'):
                 try:
                     endpoint['socket'].sendall(message_bytes)
+                    endpoint['backoff'] = 1.0  # Healthy: reset backoff
+                    continue
                 except Exception as e:
                     self.logger.warning(f"Failed to send to {endpoint['ip']}:{endpoint['port']}: {e}")
                     try:
@@ -383,58 +435,87 @@ class ADSBServer:
                     except:
                         pass
                     endpoint['socket'] = None
-                    
-                    # FIXED: Limit concurrent reconnection threads
-                    if len(self.reconnection_threads) < self.max_reconnect_threads:
-                        thread = threading.Thread(target=self.reconnect_endpoint, args=(endpoint,), daemon=True)
-                        self.reconnection_threads.add(thread)
-                        thread.start()
-                    
+
+            # No socket (never connected, or send just failed): retry with
+            # exponential backoff so a dead endpoint is never given up on
+            # but also never hammered.
+            # FIXED: Limit concurrent reconnection threads
+            if time.time() >= endpoint.get('next_retry_at', 0) and \
+                    len(self.reconnection_threads) < self.max_reconnect_threads:
+                # Claim the retry slot now so every message doesn't spawn a thread;
+                # reconnect_endpoint doubles the backoff if the attempt fails
+                endpoint['next_retry_at'] = time.time() + endpoint.get('backoff', 1.0)
+                thread = threading.Thread(target=self.reconnect_endpoint, args=(endpoint,), daemon=True)
+                self.reconnection_threads.add(thread)
+                thread.start()
+
     def run_sbs1_mode(self):
         """Run in SBS1 streaming mode"""
         self.logger.info("ADS-B Server starting in SBS1 mode...")
         
         while self.running:
+            self.last_heartbeat = time.time()
+
             # Connect to dump1090
             if not self.dump1090_socket:
                 if not self.connect_to_dump1090():
                     self.logger.info("Waiting for dump1090-fa connection... (retry in 10s)")
                     time.sleep(10)
                     continue
-                    
+
             # Connect to endpoints
             self.connect_to_endpoints()
-            
+
             # Main data processing loop
             buffer = ""
             reconnect_time = time.time()
-            
+            last_data_at = time.time()
+
             try:
                 while self.running:
+                    self.last_heartbeat = time.time()
+
                     # Reload config periodically
                     if time.time() - reconnect_time > 30:
                         self.load_config()
                         reconnect_time = time.time()
-                        
+
                     try:
                         # Receive with timeout
                         data = self.dump1090_socket.recv(4096)
                         if not data:
                             self.logger.warning("dump1090-fa connection lost")
                             break
-                            
+
+                        last_data_at = time.time()
                         buffer += data.decode('utf-8', errors='ignore')
-                        
+
                         # Process complete messages
                         while '\n' in buffer:
                             line, buffer = buffer.split('\n', 1)
                             line = line.strip()
-                            
+
                             if line and self.filter_message(line):
                                 self.forward_message(line + '\n')
-                                
-                    except socket.timeout:
-                        # Timeout is normal, just continue
+
+                    except socket.timeout as e:
+                        # Since Python 3.10 socket.timeout is TimeoutError, so
+                        # a keepalive-detected dead peer (ETIMEDOUT, has errno)
+                        # lands here too -- distinguish it from the timeout
+                        # machinery's quiet interval (no errno).
+                        if getattr(e, 'errno', None) is not None:
+                            self.logger.error(f"Error receiving data: {e}")
+                            break
+                        # No data is NORMAL (quiet airspace). Backstop: if we
+                        # have heard nothing for source_stale_after seconds,
+                        # drop and redial -- covers a wedged-but-connected
+                        # dump1090 and any half-open state the TCP keepalive
+                        # probes miss. Reconnecting locally is cheap.
+                        if time.time() - last_data_at > self.source_stale_after:
+                            self.logger.warning(
+                                f"No SBS1 data for {int(time.time() - last_data_at)}s -- "
+                                "reconnecting to dump1090 as a precaution")
+                            break
                         continue
                     except Exception as e:
                         self.logger.error(f"Error receiving data: {e}")
@@ -475,18 +556,20 @@ class ADSBServer:
         
         while self.running:
             try:
+                self.last_heartbeat = time.time()
+
                 # Reload config periodically
                 if time.time() - reconnect_time > 30:
                     self.load_config()
                     reconnect_time = time.time()
-                
+
                 # Fetch JSON data
                 aircraft_list = self.fetch_json_data()
-                
+
                 if aircraft_list and not first_success:
                     self.logger.info(f"✓ Successfully connected to JSON endpoint ({len(aircraft_list)} aircraft visible)")
                     first_success = True
-                
+
                 # Filter and forward
                 sent_count = 0
                 for aircraft in aircraft_list:
@@ -529,18 +612,20 @@ class ADSBServer:
         
         while self.running:
             try:
+                self.last_heartbeat = time.time()
+
                 # Reload config periodically
                 if time.time() - reconnect_time > 30:
                     self.load_config()
                     reconnect_time = time.time()
-                
+
                 # Fetch JSON data
                 aircraft_list = self.fetch_json_data()
-                
+
                 if aircraft_list and not first_success:
                     self.logger.info(f"✓ Successfully connected to JSON endpoint ({len(aircraft_list)} aircraft visible)")
                     first_success = True
-                
+
                 # Filter, convert and forward
                 sent_count = 0
                 for aircraft in aircraft_list:
@@ -565,12 +650,59 @@ class ADSBServer:
         
         self.logger.info("ADS-B Server stopped")
     
+    def _sd_notify(self, msg):
+        """Stdlib sd_notify(3) -- no external package so a missing dependency
+        can never turn Type=notify into a boot loop. No-op outside systemd."""
+        addr = os.environ.get("NOTIFY_SOCKET")
+        af_unix = getattr(socket, "AF_UNIX", None)
+        if not addr or af_unix is None:
+            return
+        if addr.startswith("@"):
+            addr = "\0" + addr[1:]
+        try:
+            s = socket.socket(af_unix, socket.SOCK_DGRAM)
+            try:
+                s.connect(addr)
+                s.sendall(msg)
+            finally:
+                s.close()
+        except OSError:
+            pass
+
+    def watchdog_pinger_worker(self):
+        """Send READY=1 then WATCHDOG=1 pings, but only while the main loop's
+        heartbeat is fresh -- a wedged loop stops the pings and systemd
+        (WatchdogSec) kills and restarts us."""
+        self._sd_notify(b"READY=1")
+
+        interval = 10.0
+        wd_usec = os.environ.get("WATCHDOG_USEC")
+        if wd_usec:
+            try:
+                interval = min(10.0, max(1.0, int(wd_usec) / 1_000_000 / 2))
+            except ValueError:
+                pass
+
+        while True:
+            age = time.time() - self.last_heartbeat
+            if age < self.heartbeat_stale_after:
+                self._sd_notify(b"WATCHDOG=1")
+            else:
+                self.logger.error(f"Main loop heartbeat stale ({age:.0f}s) -- "
+                                  "withholding watchdog ping; systemd will restart us")
+            time.sleep(interval)
+
     def run(self):
         """Main server loop"""
         self.running = True
-        
+
         self.logger.info(f"Starting ADS-B Server in {self.output_format} mode")
-        
+
+        # Watchdog pinger must start before the blocking mode loop so
+        # READY=1 reaches systemd immediately (Type=notify)
+        threading.Thread(target=self.watchdog_pinger_worker, daemon=True,
+                         name="sdnotify-watchdog").start()
+
         # Route to appropriate mode
         if self.output_format == 'json':
             self.run_json_mode()

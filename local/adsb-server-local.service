@@ -1,0 +1,21 @@
+# WSL-only test unit for the systemd watchdog integration test.
+# Install INSIDE WSL (as root):
+#   sed "s|%HOME%|$HOME|g" ~/adsb-test/local/adsb-server-local.service \
+#       > /etc/systemd/system/adsb-server-local.service
+#   systemctl daemon-reload && systemctl start adsb-server-local
+# Mirrors the production unit's Type/NotifyAccess/WatchdogSec exactly;
+# paths point at the ~/adsb-test copy and the fakes must already be running.
+[Unit]
+Description=ADS-B Server (local WSL test)
+After=network.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=90
+ExecStart=/usr/bin/python3 %HOME%/adsb-test/adsb_server/adsb_server.py
+Restart=always
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
