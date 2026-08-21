@@ -762,9 +762,12 @@ install -m 0644 "$INSTALL_DIR/services/adsb-wifi-powersave-off.service" \
 install -m 0644 "$INSTALL_DIR/services/adsb-hotspot-watchdog.service" \
     /etc/systemd/system/adsb-hotspot-watchdog.service
 
-# adsb-server.service: Type=simple, persistent TCP forwarder, waits for
+# adsb-server.service: Type=notify persistent TCP forwarder, waits for
 # dump1090-fa's port 30003 to be bound before starting.  Uses the venv
 # python3 so 'flask', 'sdnotify', 'psutil' all resolve.
+# The forwarder sends READY=1/WATCHDOG=1 itself (stdlib sd_notify in
+# adsb_server.py) and withholds pings if its main loop stops iterating,
+# so WatchdogSec restarts a wedged-but-alive process.
 cat >/etc/systemd/system/adsb-server.service <<EOF
 [Unit]
 Description=ADS-B Forwarder (SBS1 from dump1090 -> configured endpoints)
@@ -784,7 +787,9 @@ After=network-online.target dump1090-fa.service lighttpd.service
 Wants=dump1090-fa.service network-online.target lighttpd.service
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=90
 User=$ADSB_USER
 Group=$ADSB_USER
 WorkingDirectory=$INSTALL_DIR

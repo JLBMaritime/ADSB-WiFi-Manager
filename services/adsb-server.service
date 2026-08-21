@@ -5,7 +5,9 @@ Wants=network-online.target dump1090-fa.service
 Requires=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=90
 User=jlbmaritime
 Group=jlbmaritime
 WorkingDirectory=/home/jlbmaritime/ADSB-WiFi-Manager
